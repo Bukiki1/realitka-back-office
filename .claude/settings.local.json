@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(PORT=3456 npm run dev)",
+      "Bash(curl -s http://localhost:3456/api/init)",
+      "Bash(curl -s -o /dev/null -w \"home status: %{http_code}\\\\n\" http://localhost:3456/)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(curl -sN -X POST http://localhost:3456/api/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Kolik klientů je celkem? Jednou větou, bez grafu.\"}]}' --max-time 60)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('.env.local','utf8'\\).split\\('\\\\n'\\).forEach\\(l => { if\\(l.includes\\('='\\)\\) { const [k,...v] = l.split\\('='\\); process.env[k.trim\\(\\)] = v.join\\('='\\).trim\\(\\); } }\\); console.log\\('KEY length:', \\(process.env.ANTHROPIC_API_KEY||''\\).length, 'starts:', \\(process.env.ANTHROPIC_API_KEY||''\\).slice\\(0,15\\)\\);\")",
+      "Bash(pkill -9 -f \"next\")",
+      "Bash(xxd .env.local)",
+      "Bash(curl -s http://localhost:3000/api/init)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Pouze odpověz: Funguješ? \\(bez nástrojů\\)\"}]}' --max-time 30)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}' --max-time 10)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Kolik klientů je celkem? Jednou větou, bez grafu.\"}]}' --max-time 45)",
+      "Bash(open http://localhost:3000)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Vytvoř bar graf: labels [\\\\\"Praha \\(hl. m.\\)\\\\\", \\\\\"Brno\\\\\", \\\\\"Ostrava\\\\\"], data [50, 30, 20]. Žádný SQL, jen graf.\"}]}' --max-time 45)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Napiš pouze větu: Realitka je nejlepší firma. Jen jednu větu, nic jiného.\"}]}' --max-time 30)",
+      "Bash(curl -sIL 'https://quickchart.io/chart?bkg=%23222222&w=720&h=420&c=%7B%22type%22%3A%22bar%22%2C%22data%22%3A%7B%22labels%22%3A%5B%22Praha%20%28hl.%20m.%29%22%2C%22Brno%22%2C%22Ostrava%22%5D%2C%22datasets%22%3A%5B%7B%22label%22%3A%22Po%C4%8Det%22%2C%22data%22%3A%5B50%2C30%2C20%5D%7D%5D%7D%7D')",
+      "Bash(npx tsc *)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Řekni jen: OK\"}]}' --max-time 20)",
+      "Bash(node -e ' *)",
+      "Bash(npx tsx -e ' *)",
+      "Bash(echo \"started pid=$!\")",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000/settings)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H \"Content-Type: application/json\" -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Kolik klientů?\"}],\"model\":\"claude-sonnet-4-6-20260217\",\"provider\":\"anthropic\",\"apiKey\":\"\"}' --max-time 15)",
+      "Bash(curl -s -o /dev/null -w \"locked=%{http_code}\\\\n\" -X POST http://localhost:3000/api/chat -H \"Content-Type: application/json\" -d '{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"model\":\"gpt-5.4\",\"provider\":\"openai\",\"apiKey\":\"\"}')",
+      "Bash(echo \"pid=$!\")",
+      "Bash(curl -s -o /dev/null -w \"home=%{http_code}\\\\n\" http://localhost:3000)",
+      "Bash(curl -s -o /dev/null -w \"settings=%{http_code}\\\\n\" http://localhost:3000/settings)",
+      "Bash(curl -s http://localhost:3000/api/anthropic-key)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H \"Content-Type: application/json\" -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Kolik klientů?\"}],\"model\":\"auto\",\"apiKeys\":{}}' --max-time 20)",
+      "Bash(curl -sN -X POST http://localhost:3000/api/chat -H \"Content-Type: application/json\" -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Udělej hlubokou strategickou analýzu našeho portfolia nemovitostí a vytvoř prezentaci s doporučeními.\"}],\"model\":\"auto\",\"apiKeys\":{}}' --max-time 5)",
+      "Bash(curl -s -o /dev/null -w \"explicit=%{http_code}\\\\n\" -X POST http://localhost:3000/api/chat -H \"Content-Type: application/json\" -d '{\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"model\":\"claude-sonnet-4-6-20260217\",\"apiKeys\":{}}' --max-time 10)",
+      "Bash(curl -s -o /dev/null -w \"no_keys_locked=%{http_code}\\\\n\" -X POST http://localhost:3000/api/chat -H \"Content-Type: application/json\" -d '{\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"model\":\"gpt-5.4\",\"apiKeys\":{}}')",
+      "Bash(nohup npm *)"
+    ]
+  }
+}
