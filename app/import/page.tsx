@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import * as XLSX from "xlsx";
 
 type TableKey = "clients" | "properties" | "leads";
 
@@ -50,9 +51,10 @@ const TABLE_META: Record<TableKey, { title: string; icon: string; endpointTable:
 
 type Preview = {
   columns: string[];
-  sample: Array<Record<string, string>>;
+  sample: Array<Record<string, unknown>>;
+  rows: Array<Record<string, unknown>>;
   total: number;
-  delimiter: string;
+  sheetName: string;
 };
 
 type CommitResult = {
@@ -128,24 +130,42 @@ function ImportSection({ table }: { table: TableKey }) {
     if (!f) return;
     setBusy(true);
     try {
-      const fd = new FormData();
-      fd.append("table", meta.endpointTable);
-      fd.append("mode", "preview");
-      fd.append("file", f);
-      const res = await fetch("/api/import/csv", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        setError(data.error ?? "Nepodařilo se načíst soubor.");
-      } else {
-        const p: Preview = {
-          columns: data.columns ?? [],
-          sample: data.sample ?? [],
-          total: data.total ?? 0,
-          delimiter: data.delimiter ?? ",",
-        };
-        setPreview(p);
-        setMapping(autoGuessMapping(p.columns, fields));
+      const buf = await f.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array", cellDates: true });
+      const sheetName = wb.SheetNames[0];
+      if (!sheetName) {
+        setError("Soubor neobsahuje žádný list.");
+        return;
       }
+      const ws = wb.Sheets[sheetName];
+      const raw = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
+        defval: "",
+        raw: false,
+        blankrows: false,
+      });
+      if (raw.length === 0) {
+        setError("Soubor neobsahuje žádná data.");
+        return;
+      }
+      const colsSet = new Set<string>();
+      const order: string[] = [];
+      for (const r of raw) {
+        for (const k of Object.keys(r)) {
+          if (!colsSet.has(k)) {
+            colsSet.add(k);
+            order.push(k);
+          }
+        }
+      }
+      const p: Preview = {
+        columns: order,
+        sample: raw.slice(0, 5),
+        rows: raw,
+        total: raw.length,
+        sheetName,
+      };
+      setPreview(p);
+      setMapping(autoGuessMapping(p.columns, fields));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -164,12 +184,15 @@ function ImportSection({ table }: { table: TableKey }) {
     setError(null);
     setResult(null);
     try {
-      const fd = new FormData();
-      fd.append("table", meta.endpointTable);
-      fd.append("mode", "commit");
-      fd.append("file", file);
-      fd.append("mapping", JSON.stringify(mapping));
-      const res = await fetch("/api/import/csv", { method: "POST", body: fd });
+      const res = await fetch("/api/import/rows", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          table: meta.endpointTable,
+          mapping,
+          rows: preview.rows,
+        }),
+      });
       const data = await res.json();
       if (!res.ok || !data.ok) {
         setError(data.error ?? "Import selhal.");
@@ -206,12 +229,12 @@ function ImportSection({ table }: { table: TableKey }) {
       <div className="mb-3">
         <input
           type="file"
-          accept=".csv,.tsv,.txt,text/csv"
+          accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
           onChange={(e) => onFile(e.target.files?.[0] ?? null)}
           className="block w-full cursor-pointer rounded-lg border border-border bg-bg px-3 py-2 text-xs text-text file:mr-3 file:rounded-md file:border-0 file:bg-bg-panel file:px-3 file:py-1.5 file:text-xs file:text-text hover:file:bg-bg-hover"
         />
         <p className="mt-1 text-[11px] text-text-dim">
-          Podporovány soubory CSV (oddělovač čárka/středník/tab). Excel: uložit jako „CSV UTF-8".
+          Podporovány soubory Excel (.xlsx, .xls) a CSV. Parsování probíhá přímo v prohlížeči.
         </p>
       </div>
 
@@ -225,8 +248,8 @@ function ImportSection({ table }: { table: TableKey }) {
       {preview && (
         <>
           <div className="mb-3 text-xs text-text-dim">
-            Detekováno <strong className="text-text">{preview.total}</strong> záznamů, oddělovač{" "}
-            <code className="rounded bg-bg px-1">{preview.delimiter}</code>.
+            Detekováno <strong className="text-text">{preview.total}</strong> záznamů v listu{" "}
+            <code className="rounded bg-bg px-1">{preview.sheetName}</code>.
           </div>
 
           <div className="mb-4">
@@ -260,7 +283,7 @@ function ImportSection({ table }: { table: TableKey }) {
 
           <div className="mb-4">
             <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-text-dim">
-              Náhled (první 3 řádky)
+              Náhled (prvních {Math.min(5, preview.sample.length)} řádků)
             </div>
             <div className="overflow-x-auto rounded-lg border border-border">
               <table className="min-w-full text-[11px]">
@@ -277,11 +300,11 @@ function ImportSection({ table }: { table: TableKey }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {preview.sample.slice(0, 3).map((r, i) => (
+                  {preview.sample.map((r, i) => (
                     <tr key={i} className="odd:bg-bg-sidebar/40">
                       {preview.columns.map((c) => (
                         <td key={c} className="border-b border-border px-2 py-1 text-text">
-                          {r[c] ?? ""}
+                          {r[c] === null || r[c] === undefined ? "" : String(r[c])}
                         </td>
                       ))}
                     </tr>
@@ -310,7 +333,7 @@ function ImportSection({ table }: { table: TableKey }) {
       {result && (
         <div className="mt-4 rounded-lg border border-green-500/40 bg-green-500/10 p-3 text-xs text-green-300">
           <div className="font-medium">
-            ✓ Úspěšně importováno {result.inserted} záznamů
+            ✓ Importováno {result.inserted} záznamů
             {result.skipped > 0 && ` · ${result.skipped} přeskočeno (duplicity)`}
             {result.error_count - result.skipped > 0 &&
               ` · ${result.error_count - result.skipped} chyb`}
