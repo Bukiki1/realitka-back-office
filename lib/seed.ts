@@ -1,4 +1,4 @@
-import { getDb, initSchema } from "./db";
+import { getDb, initSchemaAsync, dbBatch, dbExec } from "./db";
 
 type Source = "web" | "doporučení" | "inzerát" | "sociální sítě";
 type PropertyType = "byt" | "dům" | "komerční";
@@ -133,30 +133,24 @@ function priceFor(type: PropertyType, city: string, areaM2: number): number {
   return Math.round(raw / 10_000) * 10_000;
 }
 
-export function seed() {
-  const db = getDb();
-  initSchema();
-
-  db.exec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;
-           DELETE FROM sqlite_sequence WHERE name IN ('clients','properties','leads','transactions','calendar_events');`);
-
-  const insertClient = db.prepare(
-    `INSERT INTO clients (name, email, phone, source, created_at, quarter,
+const CLIENT_SQL = `INSERT INTO clients (name, email, phone, source, created_at, quarter,
       budget_min, budget_max, preferred_locality, preferred_rooms, preferred_type, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  const insertProperty = db.prepare(
-    `INSERT INTO properties (address, city, district, type, price, area_m2, rooms, status,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+const PROPERTY_SQL = `INSERT INTO properties (address, city, district, type, price, area_m2, rooms, status,
       reconstruction_data, building_modifications, description, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  const insertLead = db.prepare(
-    `INSERT INTO leads (client_id, property_id, status, source, created_at, last_contact_at, next_action, estimated_commission)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  const insertTx = db.prepare(
-    `INSERT INTO transactions (property_id, client_id, sale_price, commission, transaction_date) VALUES (?, ?, ?, ?, ?)`
-  );
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+const LEAD_SQL = `INSERT INTO leads (client_id, property_id, status, source, created_at, last_contact_at, next_action, estimated_commission)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+const TX_SQL = `INSERT INTO transactions (property_id, client_id, sale_price, commission, transaction_date) VALUES (?, ?, ?, ?, ?)`;
+const EVENT_SQL = `INSERT INTO calendar_events (title, client_id, property_id, start_time, end_time, type, location, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+export async function seed() {
+  await initSchemaAsync();
+
+  // Vyčistit všechny tabulky + reset autoinkrementace.
+  await dbExec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;`);
+  await dbExec(`DELETE FROM sqlite_sequence WHERE name IN ('clients','properties','leads','transactions','calendar_events');`);
 
   const CLIENT_LOCALITIES = [
     "Praha 7","Praha 2","Praha 5","Praha 6","Praha 10",
@@ -177,33 +171,35 @@ export function seed() {
   ];
 
   // 50 klientů — 70 % má vyplněný profil preferencí
-  const clientTx = db.transaction(() => {
-    for (let i = 1; i <= 50; i++) {
-      const first = pick(FIRST_NAMES);
-      const last = pick(LAST_NAMES);
-      const date = randomDateInLastYear();
-      const hasProfile = Math.random() < 0.7;
-      let budgetMin: number | null = null;
-      let budgetMax: number | null = null;
-      let preferredLocality: string | null = null;
-      let preferredRooms: string | null = null;
-      let preferredType: string | null = null;
-      let notes: string | null = null;
+  const clientStmts: Array<{ sql: string; args: unknown[] }> = [];
+  for (let i = 1; i <= 50; i++) {
+    const first = pick(FIRST_NAMES);
+    const last = pick(LAST_NAMES);
+    const date = randomDateInLastYear();
+    const hasProfile = Math.random() < 0.7;
+    let budgetMin: number | null = null;
+    let budgetMax: number | null = null;
+    let preferredLocality: string | null = null;
+    let preferredRooms: string | null = null;
+    let preferredType: string | null = null;
+    let notes: string | null = null;
 
-      if (hasProfile) {
-        const prefType = pick(PROPERTY_TYPES);
-        preferredType = prefType;
-        preferredLocality = pick(CLIENT_LOCALITIES);
-        preferredRooms = prefType === "komerční" ? null : pick(CLIENT_ROOMS);
-        const baseMin = prefType === "byt" ? randInt(3_500_000, 8_000_000)
-          : prefType === "dům" ? randInt(8_000_000, 18_000_000)
-          : randInt(5_000_000, 25_000_000);
-        budgetMin = baseMin;
-        budgetMax = Math.round(baseMin * (1.15 + Math.random() * 0.35));
-        notes = pick(CLIENT_NOTES);
-      }
+    if (hasProfile) {
+      const prefType = pick(PROPERTY_TYPES);
+      preferredType = prefType;
+      preferredLocality = pick(CLIENT_LOCALITIES);
+      preferredRooms = prefType === "komerční" ? null : pick(CLIENT_ROOMS);
+      const baseMin = prefType === "byt" ? randInt(3_500_000, 8_000_000)
+        : prefType === "dům" ? randInt(8_000_000, 18_000_000)
+        : randInt(5_000_000, 25_000_000);
+      budgetMin = baseMin;
+      budgetMax = Math.round(baseMin * (1.15 + Math.random() * 0.35));
+      notes = pick(CLIENT_NOTES);
+    }
 
-      insertClient.run(
+    clientStmts.push({
+      sql: CLIENT_SQL,
+      args: [
         `${first} ${last}`,
         makeEmail(first, last, i),
         makePhone(),
@@ -212,38 +208,41 @@ export function seed() {
         quarterOf(date),
         budgetMin, budgetMax,
         preferredLocality, preferredRooms, preferredType,
-        notes
-      );
-    }
-  });
-  clientTx();
+        notes,
+      ],
+    });
+  }
+  await dbBatch(clientStmts);
 
   // 100 nemovitostí
-  const propertyTx = db.transaction(() => {
-    for (let i = 1; i <= 100; i++) {
-      const city = pick(["Praha","Praha","Praha","Brno","Brno","Ostrava"]);
-      const { street, district } = makeAddress(city);
-      const type = pick(PROPERTY_TYPES);
-      const areaM2 = type === "byt" ? randInt(28, 140) : type === "dům" ? randInt(90, 320) : randInt(60, 500);
-      const rooms = type === "byt" ? randInt(1, 5) : type === "dům" ? randInt(3, 8) : null;
-      const status = Math.random() < 0.7 ? "aktivní" : Math.random() < 0.5 ? "rezervováno" : "prodáno";
-      const reconstruction = Math.random() < 0.55 ? pick(RECONSTRUCTION_TEXTS) : null;
-      const buildingMods = Math.random() < 0.35 ? pick(BUILDING_MOD_TEXTS) : null;
-      const description = type === "byt" ? pick(APARTMENT_DESCRIPTIONS)
-        : type === "dům" ? pick(HOUSE_DESCRIPTIONS) : pick(COMMERCIAL_DESCRIPTIONS);
+  const propStmts: Array<{ sql: string; args: unknown[] }> = [];
+  for (let i = 1; i <= 100; i++) {
+    const city = pick(["Praha","Praha","Praha","Brno","Brno","Ostrava"]);
+    const { street, district } = makeAddress(city);
+    const type = pick(PROPERTY_TYPES);
+    const areaM2 = type === "byt" ? randInt(28, 140) : type === "dům" ? randInt(90, 320) : randInt(60, 500);
+    const rooms = type === "byt" ? randInt(1, 5) : type === "dům" ? randInt(3, 8) : null;
+    const status = Math.random() < 0.7 ? "aktivní" : Math.random() < 0.5 ? "rezervováno" : "prodáno";
+    const reconstruction = Math.random() < 0.55 ? pick(RECONSTRUCTION_TEXTS) : null;
+    const buildingMods = Math.random() < 0.35 ? pick(BUILDING_MOD_TEXTS) : null;
+    const description = type === "byt" ? pick(APARTMENT_DESCRIPTIONS)
+      : type === "dům" ? pick(HOUSE_DESCRIPTIONS) : pick(COMMERCIAL_DESCRIPTIONS);
 
-      insertProperty.run(
+    propStmts.push({
+      sql: PROPERTY_SQL,
+      args: [
         street, city, district, type,
         priceFor(type, city, areaM2),
         areaM2, rooms, status,
         reconstruction, buildingMods, description,
-        isoDate(randomDateInLastYear())
-      );
-    }
-  });
-  propertyTx();
+        isoDate(randomDateInLastYear()),
+      ],
+    });
+  }
+  await dbBatch(propStmts);
 
-  // 200 leadů za posledních 6 měsíců — 30 % má last_contact_at staré, 30 % středně, 40 % čerstvé
+  // Čteme ceny z lokální kopie (synchronní čtení, dbBatch zrcadlí lokálně).
+  const db = getDb();
   const allPropsForCommission = db.prepare(`SELECT id, price FROM properties`).all() as Array<{ id: number; price: number }>;
   const propPriceById = new Map(allPropsForCommission.map((p) => [p.id, p.price]));
 
@@ -258,68 +257,63 @@ export function seed() {
     null,
   ];
 
-  const leadTx = db.transaction(() => {
-    for (let i = 0; i < 200; i++) {
-      const clientId = randInt(1, 50);
-      const propertyId = randInt(1, 100);
-      const r = Math.random();
-      const status: LeadStatus =
-        r < 0.25 ? "nový" :
-        r < 0.55 ? "kontaktován" :
-        r < 0.78 ? "prohlídka" :
-        r < 0.92 ? "nabídka" : "uzavřen";
+  const leadStmts: Array<{ sql: string; args: unknown[] }> = [];
+  for (let i = 0; i < 200; i++) {
+    const clientId = randInt(1, 50);
+    const propertyId = randInt(1, 100);
+    const r = Math.random();
+    const status: LeadStatus =
+      r < 0.25 ? "nový" :
+      r < 0.55 ? "kontaktován" :
+      r < 0.78 ? "prohlídka" :
+      r < 0.92 ? "nabídka" : "uzavřen";
 
-      const created = randomDateWithin(180);
+    const created = randomDateWithin(180);
 
-      // last_contact_at — realisticky rozdělené:
-      // 40 % čerstvé (0–5 dní), 30 % středně (5–14 dní), 30 % staré (14–45 dní)
-      const contactRoll = Math.random();
-      let lastContactDaysAgo: number;
-      if (contactRoll < 0.4) lastContactDaysAgo = randInt(0, 5);
-      else if (contactRoll < 0.7) lastContactDaysAgo = randInt(5, 14);
-      else lastContactDaysAgo = randInt(14, 45);
-      const lastContact = new Date(Date.now() - lastContactDaysAgo * 86400000 - randInt(0, 86_399_000));
-      // Zajisti, že lastContact není dřív než created.
-      const lastContactFinal = lastContact.getTime() < created.getTime() ? created : lastContact;
+    const contactRoll = Math.random();
+    let lastContactDaysAgo: number;
+    if (contactRoll < 0.4) lastContactDaysAgo = randInt(0, 5);
+    else if (contactRoll < 0.7) lastContactDaysAgo = randInt(5, 14);
+    else lastContactDaysAgo = randInt(14, 45);
+    const lastContact = new Date(Date.now() - lastContactDaysAgo * 86400000 - randInt(0, 86_399_000));
+    const lastContactFinal = lastContact.getTime() < created.getTime() ? created : lastContact;
 
-      const nextAction = status === "uzavřen" ? null : pick(NEXT_ACTIONS);
+    const nextAction = status === "uzavřen" ? null : pick(NEXT_ACTIONS);
 
-      // Odhadovaná provize: 2–4 % ceny nemovitosti.
-      const price = propPriceById.get(propertyId) ?? 0;
-      const commissionRate = 0.02 + Math.random() * 0.02;
-      const estimatedCommission = Math.round(price * commissionRate);
+    const price = propPriceById.get(propertyId) ?? 0;
+    const commissionRate = 0.02 + Math.random() * 0.02;
+    const estimatedCommission = Math.round(price * commissionRate);
 
-      insertLead.run(
+    leadStmts.push({
+      sql: LEAD_SQL,
+      args: [
         clientId, propertyId, status, pick(SOURCES),
         isoDate(created),
         isoDate(lastContactFinal),
         nextAction,
-        estimatedCommission
-      );
-    }
-  });
-  leadTx();
+        estimatedCommission,
+      ],
+    });
+  }
+  await dbBatch(leadStmts);
 
-  // 30 transakcí - navázat na nemovitosti a klienty; preferovat 'prodáno' stav
   const soldProperties = db.prepare(`SELECT id, price FROM properties WHERE status = 'prodáno'`).all() as { id: number; price: number }[];
   const allProperties = db.prepare(`SELECT id, price FROM properties`).all() as { id: number; price: number }[];
-  const txTx = db.transaction(() => {
-    const pool = soldProperties.length >= 15 ? soldProperties : allProperties;
-    for (let i = 0; i < 30; i++) {
-      const p = pool[i % pool.length];
-      const salePrice = Math.round(p.price * (0.93 + Math.random() * 0.1));
-      const commission = Math.round(salePrice * (0.02 + Math.random() * 0.02));
-      const date = randomDateWithin(365);
-      insertTx.run(p.id, randInt(1, 50), salePrice, commission, isoDate(date));
-    }
-  });
-  txTx();
+  const pool = soldProperties.length >= 15 ? soldProperties : allProperties;
+  const txStmts: Array<{ sql: string; args: unknown[] }> = [];
+  for (let i = 0; i < 30; i++) {
+    const p = pool[i % pool.length];
+    const salePrice = Math.round(p.price * (0.93 + Math.random() * 0.1));
+    const commission = Math.round(salePrice * (0.02 + Math.random() * 0.02));
+    const date = randomDateWithin(365);
+    txStmts.push({
+      sql: TX_SQL,
+      args: [p.id, randInt(1, 50), salePrice, commission, isoDate(date)],
+    });
+  }
+  await dbBatch(txStmts);
 
-  // Calendar events — 15-20 událostí na tento + příští týden, Po-Pá 9:00–17:00
-  const insertEvent = db.prepare(
-    `INSERT INTO calendar_events (title, client_id, property_id, start_time, end_time, type, location, notes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  );
+  // Calendar events
   const clientsForCal = db.prepare(`SELECT id, name FROM clients ORDER BY RANDOM() LIMIT 40`).all() as Array<{ id: number; name: string }>;
   const propsForCal = db.prepare(`SELECT id, address FROM properties WHERE status = 'aktivní' ORDER BY RANDOM() LIMIT 40`).all() as Array<{ id: number; address: string }>;
 
@@ -351,7 +345,7 @@ export function seed() {
   }
   function mondayOf(d: Date): Date {
     const c = startOfDay(d);
-    const dow = c.getDay(); // 0=Ne
+    const dow = c.getDay();
     const diff = dow === 0 ? -6 : 1 - dow;
     c.setDate(c.getDate() + diff);
     return c;
@@ -372,7 +366,6 @@ export function seed() {
   const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
   const tomorrowIdx = daysPool.findIndex((d) => startOfDay(d).getTime() === startOfDay(tomorrow).getTime());
 
-  // Rozvrh: 3-4 dnes, 3 zítra, zbytek rozdělit po 1-2 na zbylé dny. Celkem 15-20.
   const plan: Array<{ dayIdx: number; startHour: number; startMin: number; durMin: number }> = [];
   const addSlots = (dayIdx: number, count: number) => {
     if (dayIdx < 0) return;
@@ -390,62 +383,62 @@ export function seed() {
 
   if (todayIdx >= 0) addSlots(todayIdx, 4);
   if (tomorrowIdx >= 0) addSlots(tomorrowIdx, 3);
-  // Zbytek
   const remainingDays = daysPool.map((_, i) => i).filter((i) => i !== todayIdx && i !== tomorrowIdx);
   for (const di of remainingDays) {
     addSlots(di, randInt(1, 2));
   }
-  // Celkem cílíme na 15-20.
   while (plan.length < 15) {
     addSlots(remainingDays[randInt(0, remainingDays.length - 1)], 1);
   }
   if (plan.length > 20) plan.length = 20;
 
-  const calTx = db.transaction(() => {
-    for (const slot of plan) {
-      const day = daysPool[slot.dayIdx];
-      const start = new Date(day);
-      start.setHours(slot.startHour, slot.startMin, 0, 0);
-      const end = new Date(start.getTime() + slot.durMin * 60_000);
+  const eventStmts: Array<{ sql: string; args: unknown[] }> = [];
+  for (const slot of plan) {
+    const day = daysPool[slot.dayIdx];
+    const start = new Date(day);
+    start.setHours(slot.startHour, slot.startMin, 0, 0);
+    const end = new Date(start.getTime() + slot.durMin * 60_000);
 
-      const typ = (() => {
-        const r = Math.random();
-        if (r < 0.45) return "prohlídka";
-        if (r < 0.75) return "meeting";
-        if (r < 0.92) return "hovor";
-        return "jiné";
-      })() as typeof EVENT_TYPES[number];
+    const typ = (() => {
+      const r = Math.random();
+      if (r < 0.45) return "prohlídka";
+      if (r < 0.75) return "meeting";
+      if (r < 0.92) return "hovor";
+      return "jiné";
+    })() as typeof EVENT_TYPES[number];
 
-      const client = clientsForCal.length ? pick(clientsForCal) : null;
-      const prop = typ === "prohlídka" && propsForCal.length ? pick(propsForCal) : (Math.random() < 0.2 && propsForCal.length ? pick(propsForCal) : null);
+    const client = clientsForCal.length ? pick(clientsForCal) : null;
+    const prop = typ === "prohlídka" && propsForCal.length ? pick(propsForCal) : (Math.random() < 0.2 && propsForCal.length ? pick(propsForCal) : null);
 
-      let title: string;
-      let location: string | null = null;
-      if (typ === "prohlídka" && prop) {
-        title = `Prohlídka — ${prop.address}${client ? ` (${client.name})` : ""}`;
-        location = prop.address;
-      } else if (typ === "meeting") {
-        title = client ? `${pick(MEETING_TITLES)} — ${client.name}` : pick(MEETING_TITLES);
-        location = pick(MEETING_LOCS);
-      } else if (typ === "hovor") {
-        title = client ? `${pick(CALL_TITLES)} — ${client.name}` : pick(CALL_TITLES);
-        location = "Telefon";
-      } else {
-        title = pick(OTHER_TITLES);
-        location = pick(MEETING_LOCS);
-      }
+    let title: string;
+    let location: string | null = null;
+    if (typ === "prohlídka" && prop) {
+      title = `Prohlídka — ${prop.address}${client ? ` (${client.name})` : ""}`;
+      location = prop.address;
+    } else if (typ === "meeting") {
+      title = client ? `${pick(MEETING_TITLES)} — ${client.name}` : pick(MEETING_TITLES);
+      location = pick(MEETING_LOCS);
+    } else if (typ === "hovor") {
+      title = client ? `${pick(CALL_TITLES)} — ${client.name}` : pick(CALL_TITLES);
+      location = "Telefon";
+    } else {
+      title = pick(OTHER_TITLES);
+      location = pick(MEETING_LOCS);
+    }
 
-      const notes = Math.random() < 0.35
-        ? pick([
-            "Přinést tištěné podklady.",
-            "Potvrdit účast den předem SMS.",
-            "Klient zmínil zájem o financování.",
-            "Druhá prohlídka — pozor na dotazy k rekonstrukci.",
-            "Připravit srovnání s alternativními nabídkami.",
-          ])
-        : null;
+    const notes = Math.random() < 0.35
+      ? pick([
+          "Přinést tištěné podklady.",
+          "Potvrdit účast den předem SMS.",
+          "Klient zmínil zájem o financování.",
+          "Druhá prohlídka — pozor na dotazy k rekonstrukci.",
+          "Připravit srovnání s alternativními nabídkami.",
+        ])
+      : null;
 
-      insertEvent.run(
+    eventStmts.push({
+      sql: EVENT_SQL,
+      args: [
         title,
         client?.id ?? null,
         prop?.id ?? null,
@@ -455,10 +448,10 @@ export function seed() {
         location,
         notes,
         isoDate(new Date()),
-      );
-    }
-  });
-  calTx();
+      ],
+    });
+  }
+  await dbBatch(eventStmts);
 
   const counts = {
     clients: (db.prepare(`SELECT COUNT(*) AS c FROM clients`).get() as any).c,
@@ -472,5 +465,8 @@ export function seed() {
 }
 
 if (require.main === module) {
-  seed();
+  seed().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
 }

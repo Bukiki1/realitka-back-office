@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,7 +75,7 @@ function dayBounds(d: Date): { from: string; to: string } {
 
 export async function GET() {
   try {
-    initSchema();
+    await ensureLocalReady();
     const db = getDb();
 
     // URGENTNÍ FOLLOW-UPY — leady v aktivních fázích, last_contact_at >= 5 dní

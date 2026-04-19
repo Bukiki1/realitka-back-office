@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { getDb, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady, dbExec } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  initSchema();
+  await ensureLocalReady();
   let body: { confirm?: string } = {};
   try {
     body = await req.json();
@@ -24,12 +24,9 @@ export async function POST(req: Request) {
     transactions: (db.prepare(`SELECT COUNT(*) AS c FROM transactions`).get() as { c: number }).c,
     calendar_events: (db.prepare(`SELECT COUNT(*) AS c FROM calendar_events`).get() as { c: number }).c,
   };
-  const tx = db.transaction(() => {
-    db.exec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;`);
-    db.exec(`DELETE FROM sqlite_sequence WHERE name IN ('clients','properties','leads','transactions','calendar_events');`);
-  });
   try {
-    tx();
+    await dbExec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;`);
+    await dbExec(`DELETE FROM sqlite_sequence WHERE name IN ('clients','properties','leads','transactions','calendar_events');`);
   } catch (e: unknown) {
     return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 500 });
   }

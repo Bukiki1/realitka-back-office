@@ -1,24 +1,14 @@
 import { NextResponse } from "next/server";
-import { getDb, getTursoClient, hasTursoConfig, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady } from "@/lib/db";
 import { seed } from "@/lib/seed";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  // Turso embedded replica: při prvním volání (nebo po cold-startu na Vercelu,
-  // kde je /tmp prázdný) nejdřív stáhneme poslední stav z cloudu. getTursoClient()
-  // vytvoří lokální soubor file:/tmp/realitka.db synchronizovaný s remote URL a
-  // provede initial sync. Pokud Turso není nastaveno, funkce vrátí null a my
-  // pokračujeme s čistě lokální better-sqlite3 databází.
-  if (hasTursoConfig()) {
-    try {
-      await getTursoClient();
-    } catch (err) {
-      console.warn("[init] Turso sync failed:", err instanceof Error ? err.message : err);
-    }
-  }
-  initSchema();
+  // ensureLocalReady se postará o init schématu + stažení Turso snapshotu
+  // do /tmp souboru (pokud je Turso nakonfigurované). Na lokálu jen initSchema().
+  await ensureLocalReady();
   const db = getDb();
   const url = new URL(req.url);
   const force = url.searchParams.get("reseed") === "1";
@@ -39,7 +29,7 @@ export async function GET(req: Request) {
   }
 
   if (needsReseed) {
-    seed();
+    await seed();
     const newCounts = {
       clients: (db.prepare(`SELECT COUNT(*) AS c FROM clients`).get() as any).c,
       properties: (db.prepare(`SELECT COUNT(*) AS c FROM properties`).get() as any).c,

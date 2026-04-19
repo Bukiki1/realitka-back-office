@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
-import { getDb, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  initSchema();
+  await ensureLocalReady();
   const db = getDb();
   const dump = {
     exported_at: new Date().toISOString(),

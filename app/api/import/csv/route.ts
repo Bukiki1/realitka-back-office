@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady } from "@/lib/db";
 import { runTool } from "@/lib/tools";
 
 export const runtime = "nodejs";
@@ -171,7 +171,7 @@ function applyMapping(
 }
 
 export async function POST(req: Request) {
-  initSchema();
+  await ensureLocalReady();
   const form = await req.formData();
   const tableRaw = String(form.get("table") ?? "");
   if (!TABLES.includes(tableRaw as TableName)) {

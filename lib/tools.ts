@@ -1,6 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import * as cheerio from "cheerio";
-import { getDb, initSchema } from "./db";
+import { getDb, dbRun, ensureLocalReady } from "./db";
 
 export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
@@ -573,7 +573,7 @@ function isSelectOnly(sql: string): boolean {
 
 export async function runTool(name: string, input: Record<string, unknown>): Promise<ToolResult> {
   try {
-    initSchema();
+    await ensureLocalReady();
     switch (name) {
       case "query_database":
         return toolQueryDatabase(input);
@@ -610,29 +610,29 @@ export async function runTool(name: string, input: Record<string, unknown>): Pro
       case "price_context":
         return toolPriceContext(input);
       case "add_client":
-        return toolAddClient(input);
+        return await toolAddClient(input);
       case "update_client":
-        return toolUpdateClient(input);
+        return await toolUpdateClient(input);
       case "delete_client":
-        return toolDeleteClient(input);
+        return await toolDeleteClient(input);
       case "add_property":
-        return toolAddProperty(input);
+        return await toolAddProperty(input);
       case "update_property":
-        return toolUpdateProperty(input);
+        return await toolUpdateProperty(input);
       case "delete_property":
-        return toolDeleteProperty(input);
+        return await toolDeleteProperty(input);
       case "add_lead":
-        return toolAddLead(input);
+        return await toolAddLead(input);
       case "update_lead":
-        return toolUpdateLead(input);
+        return await toolUpdateLead(input);
       case "delete_lead":
-        return toolDeleteLead(input);
+        return await toolDeleteLead(input);
       case "add_transaction":
-        return toolAddTransaction(input);
+        return await toolAddTransaction(input);
       case "import_csv":
         return toolImportCsv(input);
       case "manage_calendar":
-        return toolManageCalendar(input);
+        return await toolManageCalendar(input);
       case "view_calendar":
         return toolViewCalendar(input);
       default:
@@ -2585,7 +2585,7 @@ const PROPERTY_TYPES = ["byt", "dům", "komerční"] as const;
 const PROPERTY_STATUSES = ["aktivní", "prodáno", "rezervováno"] as const;
 const LEAD_STATUSES = ["nový", "kontaktován", "prohlídka", "nabídka", "uzavřen"] as const;
 
-function toolAddClient(input: Record<string, unknown>): ToolResult {
+async function toolAddClient(input: Record<string, unknown>): Promise<ToolResult> {
   const name = typeof input.name === "string" ? input.name.trim() : "";
   const email = typeof input.email === "string" ? input.email.trim() : "";
   const phone = typeof input.phone === "string" ? input.phone.trim() : "";
@@ -2598,18 +2598,19 @@ function toolAddClient(input: Record<string, unknown>): ToolResult {
   }
 
   const db = getDb();
-  const info = db.prepare(
+  const info = await dbRun(
     `INSERT INTO clients (name, email, phone, source, created_at, quarter,
                           budget_min, budget_max, preferred_locality, preferred_rooms, preferred_type, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    name, email, phone, source, nowIso(), currentQuarter(),
-    typeof input.budget_min === "number" ? input.budget_min : null,
-    typeof input.budget_max === "number" ? input.budget_max : null,
-    typeof input.preferred_locality === "string" ? input.preferred_locality : null,
-    typeof input.preferred_rooms === "string" ? input.preferred_rooms : null,
-    typeof input.preferred_type === "string" ? input.preferred_type : null,
-    typeof input.notes === "string" ? input.notes : null,
+    [
+      name, email, phone, source, nowIso(), currentQuarter(),
+      typeof input.budget_min === "number" ? input.budget_min : null,
+      typeof input.budget_max === "number" ? input.budget_max : null,
+      typeof input.preferred_locality === "string" ? input.preferred_locality : null,
+      typeof input.preferred_rooms === "string" ? input.preferred_rooms : null,
+      typeof input.preferred_type === "string" ? input.preferred_type : null,
+      typeof input.notes === "string" ? input.notes : null,
+    ],
   );
   const id = Number(info.lastInsertRowid);
   const row = db.prepare(`SELECT * FROM clients WHERE id = ?`).get(id);
@@ -2622,7 +2623,7 @@ function toolAddClient(input: Record<string, unknown>): ToolResult {
   return { ok: true, data: { ui: "crud", id, row, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY do své odpovědi. Pod ním potvrď 1-2 větami, co se uložilo a jaký je další logický krok (např. 'Můžeš nyní vytvořit lead na konkrétní nemovitost.')." } };
 }
 
-function toolUpdateClient(input: Record<string, unknown>): ToolResult {
+async function toolUpdateClient(input: Record<string, unknown>): Promise<ToolResult> {
   const db = getDb();
   const target = findClient(db,
     typeof input.id === "number" ? input.id : null,
@@ -2647,13 +2648,13 @@ function toolUpdateClient(input: Record<string, unknown>): ToolResult {
   }
   if (updates.length === 0) return { ok: false, error: "Žádná pole k aktualizaci." };
   params.push(target.id);
-  db.prepare(`UPDATE clients SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+  await dbRun(`UPDATE clients SET ${updates.join(", ")} WHERE id = ?`, params);
   const row = db.prepare(`SELECT * FROM clients WHERE id = ?`).get(target.id);
   const html = confirmHtml(`Klient #${target.id} (${target.name}) aktualizován`, changes, "update");
   return { ok: true, data: { ui: "crud", id: target.id, row, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolDeleteClient(input: Record<string, unknown>): ToolResult {
+async function toolDeleteClient(input: Record<string, unknown>): Promise<ToolResult> {
   const db = getDb();
   const target = findClient(db,
     typeof input.id === "number" ? input.id : null,
@@ -2661,15 +2662,15 @@ function toolDeleteClient(input: Record<string, unknown>): ToolResult {
   if (!target) return { ok: false, error: "Klient nenalezen." };
 
   const leadCount = (db.prepare(`SELECT COUNT(*) AS c FROM leads WHERE client_id = ?`).get(target.id) as { c: number }).c;
-  db.prepare(`DELETE FROM leads WHERE client_id = ?`).run(target.id);
-  db.prepare(`DELETE FROM clients WHERE id = ?`).run(target.id);
+  await dbRun(`DELETE FROM leads WHERE client_id = ?`, [target.id]);
+  await dbRun(`DELETE FROM clients WHERE id = ?`, [target.id]);
   const html = confirmHtml(`Klient #${target.id} (${target.name}) smazán`, [
     ["Smazané leady", leadCount],
   ], "delete");
   return { ok: true, data: { ui: "crud", id: target.id, deleted_leads: leadCount, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolAddProperty(input: Record<string, unknown>): ToolResult {
+async function toolAddProperty(input: Record<string, unknown>): Promise<ToolResult> {
   const address = typeof input.address === "string" ? input.address.trim() : "";
   const city = typeof input.city === "string" ? input.city.trim() : "";
   const district = typeof input.district === "string" ? input.district.trim() : "";
@@ -2687,17 +2688,18 @@ function toolAddProperty(input: Record<string, unknown>): ToolResult {
   if (!description) return { ok: false, error: "description je povinné." };
 
   const db = getDb();
-  const info = db.prepare(
+  const info = await dbRun(
     `INSERT INTO properties (address, city, district, type, price, area_m2, rooms, status,
                              reconstruction_data, building_modifications, description, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    address, city, district, type, price, area,
-    typeof input.rooms === "number" ? input.rooms : null,
-    status,
-    typeof input.reconstruction_data === "string" ? input.reconstruction_data : null,
-    typeof input.building_modifications === "string" ? input.building_modifications : null,
-    description, nowIso(),
+    [
+      address, city, district, type, price, area,
+      typeof input.rooms === "number" ? input.rooms : null,
+      status,
+      typeof input.reconstruction_data === "string" ? input.reconstruction_data : null,
+      typeof input.building_modifications === "string" ? input.building_modifications : null,
+      description, nowIso(),
+    ],
   );
   const id = Number(info.lastInsertRowid);
   const row = db.prepare(`SELECT * FROM properties WHERE id = ?`).get(id);
@@ -2709,7 +2711,7 @@ function toolAddProperty(input: Record<string, unknown>): ToolResult {
   return { ok: true, data: { ui: "crud", id, row, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolUpdateProperty(input: Record<string, unknown>): ToolResult {
+async function toolUpdateProperty(input: Record<string, unknown>): Promise<ToolResult> {
   const db = getDb();
   const target = findProperty(db,
     typeof input.id === "number" ? input.id : null,
@@ -2730,28 +2732,28 @@ function toolUpdateProperty(input: Record<string, unknown>): ToolResult {
   }
   if (updates.length === 0) return { ok: false, error: "Žádná pole k aktualizaci." };
   params.push(target.id);
-  db.prepare(`UPDATE properties SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+  await dbRun(`UPDATE properties SET ${updates.join(", ")} WHERE id = ?`, params);
   const row = db.prepare(`SELECT * FROM properties WHERE id = ?`).get(target.id);
   const html = confirmHtml(`Nemovitost #${target.id} (${target.address}) aktualizována`, changes, "update");
   return { ok: true, data: { ui: "crud", id: target.id, row, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolDeleteProperty(input: Record<string, unknown>): ToolResult {
+async function toolDeleteProperty(input: Record<string, unknown>): Promise<ToolResult> {
   const db = getDb();
   const target = findProperty(db,
     typeof input.id === "number" ? input.id : null,
     typeof input.address_match === "string" ? input.address_match : null);
   if (!target) return { ok: false, error: "Nemovitost nenalezena." };
   const leadCount = (db.prepare(`SELECT COUNT(*) AS c FROM leads WHERE property_id = ?`).get(target.id) as { c: number }).c;
-  db.prepare(`DELETE FROM leads WHERE property_id = ?`).run(target.id);
-  db.prepare(`DELETE FROM properties WHERE id = ?`).run(target.id);
+  await dbRun(`DELETE FROM leads WHERE property_id = ?`, [target.id]);
+  await dbRun(`DELETE FROM properties WHERE id = ?`, [target.id]);
   const html = confirmHtml(`Nemovitost #${target.id} (${target.address}) smazána`, [
     ["Smazané leady", leadCount],
   ], "delete");
   return { ok: true, data: { ui: "crud", id: target.id, deleted_leads: leadCount, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolAddLead(input: Record<string, unknown>): ToolResult {
+async function toolAddLead(input: Record<string, unknown>): Promise<ToolResult> {
   const db = getDb();
   const client = findClient(db,
     typeof input.client_id === "number" ? input.client_id : null,
@@ -2766,14 +2768,15 @@ function toolAddLead(input: Record<string, unknown>): ToolResult {
   const source = typeof input.source === "string" ? input.source : "";
   if (!source) return { ok: false, error: "source je povinný." };
 
-  const info = db.prepare(
+  const info = await dbRun(
     `INSERT INTO leads (client_id, property_id, status, source, created_at, last_contact_at, next_action, estimated_commission)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    client.id, property.id, status, source, nowIso(),
-    typeof input.last_contact_at === "string" ? input.last_contact_at : nowIso(),
-    typeof input.next_action === "string" ? input.next_action : null,
-    typeof input.estimated_commission === "number" ? input.estimated_commission : null,
+    [
+      client.id, property.id, status, source, nowIso(),
+      typeof input.last_contact_at === "string" ? input.last_contact_at : nowIso(),
+      typeof input.next_action === "string" ? input.next_action : null,
+      typeof input.estimated_commission === "number" ? input.estimated_commission : null,
+    ],
   );
   const id = Number(info.lastInsertRowid);
   const row = db.prepare(`SELECT * FROM leads WHERE id = ?`).get(id);
@@ -2786,7 +2789,7 @@ function toolAddLead(input: Record<string, unknown>): ToolResult {
   return { ok: true, data: { ui: "crud", id, row, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolUpdateLead(input: Record<string, unknown>): ToolResult {
+async function toolUpdateLead(input: Record<string, unknown>): Promise<ToolResult> {
   const id = typeof input.id === "number" ? input.id : null;
   if (!id) return { ok: false, error: "Chybí id." };
   const db = getDb();
@@ -2806,23 +2809,23 @@ function toolUpdateLead(input: Record<string, unknown>): ToolResult {
 
   if (updates.length === 0) return { ok: false, error: "Žádná pole k aktualizaci." };
   params.push(id);
-  db.prepare(`UPDATE leads SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+  await dbRun(`UPDATE leads SET ${updates.join(", ")} WHERE id = ?`, params);
   const row = db.prepare(`SELECT * FROM leads WHERE id = ?`).get(id);
   const html = confirmHtml(`Lead #${id} aktualizován`, changes, "update");
   return { ok: true, data: { ui: "crud", id, row, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolDeleteLead(input: Record<string, unknown>): ToolResult {
+async function toolDeleteLead(input: Record<string, unknown>): Promise<ToolResult> {
   const id = typeof input.id === "number" ? input.id : null;
   if (!id) return { ok: false, error: "Chybí id." };
   const db = getDb();
-  const info = db.prepare(`DELETE FROM leads WHERE id = ?`).run(id);
+  const info = await dbRun(`DELETE FROM leads WHERE id = ?`, [id]);
   if (info.changes === 0) return { ok: false, error: `Lead #${id} neexistuje.` };
   const html = confirmHtml(`Lead #${id} smazán`, [], "delete");
   return { ok: true, data: { ui: "crud", id, markdown: html, instructions_for_agent: "Vlož pole markdown BEZE ZMĚNY." } };
 }
 
-function toolAddTransaction(input: Record<string, unknown>): ToolResult {
+async function toolAddTransaction(input: Record<string, unknown>): Promise<ToolResult> {
   const db = getDb();
   const property = findProperty(db,
     typeof input.property_id === "number" ? input.property_id : null,
@@ -2839,14 +2842,17 @@ function toolAddTransaction(input: Record<string, unknown>): ToolResult {
   if (!Number.isFinite(commission) || commission < 0) return { ok: false, error: "commission musí být nezáporné." };
   const date = typeof input.transaction_date === "string" ? input.transaction_date : new Date().toISOString().slice(0, 10);
 
-  const info = db.prepare(
+  const info = await dbRun(
     `INSERT INTO transactions (property_id, client_id, sale_price, commission, transaction_date)
      VALUES (?, ?, ?, ?, ?)`,
-  ).run(property.id, client.id, salePrice, commission, date);
+    [property.id, client.id, salePrice, commission, date],
+  );
   // Nastav property = prodáno, související lead → uzavřen.
-  db.prepare(`UPDATE properties SET status = 'prodáno' WHERE id = ?`).run(property.id);
-  db.prepare(`UPDATE leads SET status = 'uzavřen', last_contact_at = ? WHERE client_id = ? AND property_id = ?`)
-    .run(nowIso(), client.id, property.id);
+  await dbRun(`UPDATE properties SET status = 'prodáno' WHERE id = ?`, [property.id]);
+  await dbRun(
+    `UPDATE leads SET status = 'uzavřen', last_contact_at = ? WHERE client_id = ? AND property_id = ?`,
+    [nowIso(), client.id, property.id],
+  );
 
   const id = Number(info.lastInsertRowid);
   const html = confirmHtml(`Transakce #${id} uzavřena`, [
@@ -3015,7 +3021,7 @@ function formatEventLine(e: CalEvent): string {
   return parts.join("  \n");
 }
 
-function toolManageCalendar(input: Record<string, unknown>): ToolResult {
+async function toolManageCalendar(input: Record<string, unknown>): Promise<ToolResult> {
   const action = String(input.action ?? "").trim();
   if (!action) return { ok: false, error: "Chybí action (add|list|find_free|move|cancel)." };
 
@@ -3213,19 +3219,20 @@ function toolManageCalendar(input: Record<string, unknown>): ToolResult {
        ORDER BY start_time ASC`,
     ).all(toLocalIso(start), toLocalIso(end)) as Array<{ id: number; title: string; start_time: string; end_time: string }>;
 
-    const info = db.prepare(
+    const info = await dbRun(
       `INSERT INTO calendar_events (title, client_id, property_id, start_time, end_time, type, location, notes, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      title,
-      client?.id ?? null,
-      property?.id ?? null,
-      toLocalIso(start),
-      toLocalIso(end),
-      typ,
-      typeof input.location === "string" ? input.location : null,
-      typeof input.notes === "string" ? input.notes : null,
-      toLocalIso(new Date()),
+      [
+        title,
+        client?.id ?? null,
+        property?.id ?? null,
+        toLocalIso(start),
+        toLocalIso(end),
+        typ,
+        typeof input.location === "string" ? input.location : null,
+        typeof input.notes === "string" ? input.notes : null,
+        toLocalIso(new Date()),
+      ],
     );
     const id = Number(info.lastInsertRowid);
 
@@ -3280,9 +3287,10 @@ function toolManageCalendar(input: Record<string, unknown>): ToolResult {
     const newLocation = typeof input.location === "string" ? input.location : existing.location;
     const newNotes = typeof input.notes === "string" ? input.notes : existing.notes;
 
-    db.prepare(
+    await dbRun(
       `UPDATE calendar_events SET title = ?, start_time = ?, end_time = ?, location = ?, notes = ? WHERE id = ?`,
-    ).run(newTitle, toLocalIso(start), toLocalIso(end), newLocation, newNotes, eid);
+      [newTitle, toLocalIso(start), toLocalIso(end), newLocation, newNotes, eid],
+    );
 
     const rows: Array<[string, unknown]> = [
       ["Událost", newTitle],
@@ -3299,7 +3307,7 @@ function toolManageCalendar(input: Record<string, unknown>): ToolResult {
     if (!eid) return { ok: false, error: "Chybí event_id." };
     const existing = db.prepare(`SELECT * FROM calendar_events WHERE id = ?`).get(eid) as CalEvent | undefined;
     if (!existing) return { ok: false, error: `Událost #${eid} nenalezena.` };
-    db.prepare(`DELETE FROM calendar_events WHERE id = ?`).run(eid);
+    await dbRun(`DELETE FROM calendar_events WHERE id = ?`, [eid]);
     const md = confirmHtml(`📅 Schůzka #${eid} zrušena`, [
       ["Událost", existing.title],
       ["Původní čas", existing.start_time],

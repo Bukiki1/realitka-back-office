@@ -1,19 +1,19 @@
 import { NextResponse } from "next/server";
-import { getDb, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady } from "@/lib/db";
 import { runTool } from "@/lib/tools";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  initSchema();
+  await ensureLocalReady();
   const db = getDb();
   const rows = db.prepare(`SELECT * FROM leads ORDER BY id`).all();
   return NextResponse.json({ count: rows.length, leads: rows });
 }
 
 export async function POST(req: Request) {
-  initSchema();
+  await ensureLocalReady();
   let body: Record<string, unknown>;
   try {
     body = await req.json();

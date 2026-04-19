@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,7 +31,7 @@ function trend(delta: number): "up" | "down" | "flat" {
 
 export async function GET() {
   try {
-    initSchema();
+    await ensureLocalReady();
     const db = getDb();
 
     const now = new Date();

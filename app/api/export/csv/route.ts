@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, initSchema } from "@/lib/db";
+import { getDb, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -23,7 +23,7 @@ function rowsToCsv(rows: Array<Record<string, unknown>>): string {
 }
 
 export async function GET(req: Request) {
-  initSchema();
+  await ensureLocalReady();
   const url = new URL(req.url);
   const tableParam = url.searchParams.get("table") ?? "";
   if (!ALLOWED.includes(tableParam as Table)) {
