@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
-import { enterTestMode, exitTestMode, getDbMode, initSchema } from "@/lib/db";
+import { enterTestMode, exitTestMode, getDbMode, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    return NextResponse.json({ ok: true, mode: getDbMode() });
+    await ensureLocalReady();
+    const mode = await getDbMode();
+    return NextResponse.json({ ok: true, mode });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : String(e) },
@@ -22,20 +24,18 @@ export async function POST(req: Request) {
   } catch {}
   const action = String(body.action ?? "");
   try {
+    await ensureLocalReady();
     if (action === "enter_test") {
-      const r = enterTestMode();
-      initSchema();
-      return NextResponse.json({ ok: true, mode: getDbMode(), copied: r.copied });
+      const r = await enterTestMode();
+      return NextResponse.json({ ok: true, mode: await getDbMode(), copied: r.copied });
     }
     if (action === "exit_test_discard") {
-      exitTestMode("discard");
-      initSchema();
-      return NextResponse.json({ ok: true, mode: getDbMode() });
+      await exitTestMode("discard");
+      return NextResponse.json({ ok: true, mode: await getDbMode() });
     }
     if (action === "exit_test_commit") {
-      exitTestMode("commit");
-      initSchema();
-      return NextResponse.json({ ok: true, mode: getDbMode() });
+      await exitTestMode("commit");
+      return NextResponse.json({ ok: true, mode: await getDbMode() });
     }
     return NextResponse.json(
       { ok: false, error: "action musí být enter_test / exit_test_discard / exit_test_commit." },

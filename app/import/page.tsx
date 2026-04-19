@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 
-type TableKey = "clients" | "properties" | "leads";
+type TableKey = "clients" | "properties" | "leads" | "transactions" | "calendar";
 
-type DbField = { key: string; label: string; required?: boolean; hint?: string };
+type DbField = { key: string; label: string; required?: boolean; hint?: string; readonly?: boolean };
 
 const FIELD_DEFS: Record<TableKey, DbField[]> = {
   clients: [
@@ -41,12 +41,38 @@ const FIELD_DEFS: Record<TableKey, DbField[]> = {
     { key: "next_action", label: "Další krok" },
     { key: "estimated_commission", label: "Odhad provize" },
   ],
+  transactions: [
+    { key: "property_address", label: "Nemovitost (adresa)", required: true, hint: "vyhledá nemovitost podle adresy" },
+    { key: "client_name", label: "Klient (jméno)", required: true, hint: "vyhledá klienta podle jména" },
+    { key: "sale_price", label: "Prodejní cena (Kč)", required: true },
+    { key: "commission", label: "Provize (Kč)", required: true },
+    { key: "transaction_date", label: "Datum transakce", required: true, hint: "YYYY-MM-DD" },
+  ],
+  calendar: [
+    { key: "title", label: "Název", required: true },
+    { key: "start_time", label: "Začátek", required: true, hint: "YYYY-MM-DD HH:MM" },
+    { key: "end_time", label: "Konec", required: true, hint: "YYYY-MM-DD HH:MM" },
+    { key: "type", label: "Typ", required: true, hint: "prohlídka / meeting / hovor / jiné" },
+    { key: "location", label: "Místo" },
+    { key: "notes", label: "Poznámky" },
+    { key: "client_id", label: "Klient (id)" },
+    { key: "property_id", label: "Nemovitost (id)" },
+  ],
 };
 
-const TABLE_META: Record<TableKey, { title: string; icon: string; endpointTable: string }> = {
-  clients:    { title: "Import klientů",     icon: "👥", endpointTable: "clients" },
-  properties: { title: "Import nemovitostí", icon: "🏠", endpointTable: "properties" },
-  leads:      { title: "Import leadů",       icon: "📊", endpointTable: "leads" },
+const TABLE_META: Record<TableKey, {
+  title: string;
+  icon: string;
+  endpointTable: string;
+  apiList: string;
+  apiItem: (id: number) => string;
+  listKey: string;
+}> = {
+  clients:      { title: "Import klientů",      icon: "👥", endpointTable: "clients",        apiList: "/api/data/clients",      apiItem: (id) => `/api/data/clients/${id}`,     listKey: "clients" },
+  properties:   { title: "Import nemovitostí",  icon: "🏠", endpointTable: "properties",     apiList: "/api/data/properties",   apiItem: (id) => `/api/data/properties/${id}`,  listKey: "properties" },
+  leads:        { title: "Import leadů",        icon: "📊", endpointTable: "leads",          apiList: "/api/data/leads",        apiItem: (id) => `/api/data/leads/${id}`,       listKey: "leads" },
+  transactions: { title: "Import transakcí",    icon: "💰", endpointTable: "transactions",   apiList: "/api/data/transactions", apiItem: (id) => `/api/data/transactions/${id}`, listKey: "transactions" },
+  calendar:     { title: "Import kalendáře",    icon: "📅", endpointTable: "calendar_events", apiList: "/api/data/calendar",    apiItem: (id) => `/api/data/calendar/${id}`,     listKey: "events" },
 };
 
 type Preview = {
@@ -63,6 +89,7 @@ type CommitResult = {
   skipped: number;
   error_count: number;
   errors: Array<{ row: number; error: string }>;
+  strategy?: string;
 };
 
 function autoGuessMapping(columns: string[], fields: DbField[]): Record<string, string> {
@@ -96,6 +123,15 @@ function autoGuessMapping(columns: string[], fields: DbField[]): Record<string, 
     last_contact_at: ["datum_posledniho_kontaktu", "last_contact_at", "datum_kontaktu"],
     next_action: ["dalsi_krok", "next_action"],
     estimated_commission: ["odhad_provize", "provize", "commission"],
+    sale_price: ["prodejni_cena", "cena_prodeje", "sale_price"],
+    commission: ["provize", "commission"],
+    transaction_date: ["datum_transakce", "datum_prodeje", "transaction_date", "datum"],
+    title: ["nazev", "titulek", "title", "udalost"],
+    start_time: ["zacatek", "start", "start_time", "od"],
+    end_time: ["konec", "end", "end_time", "do"],
+    location: ["misto", "adresa_mista", "location"],
+    client_id: ["klient_id", "client_id", "id_klienta"],
+    property_id: ["nemovitost_id", "property_id", "id_nemovitosti"],
   };
   for (const col of columns) {
     const n = norm(col);
@@ -111,6 +147,216 @@ function autoGuessMapping(columns: string[], fields: DbField[]): Record<string, 
   return out;
 }
 
+function EditModal({
+  table,
+  record,
+  onClose,
+  onSaved,
+}: {
+  table: TableKey;
+  record: Record<string, unknown>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const fields = useMemo(() => EDIT_FIELDS[table], [table]);
+  const [values, setValues] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const f of fields) {
+      const v = record[f.key];
+      init[f.key] = v === null || v === undefined ? "" : String(v);
+    }
+    return init;
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const id = Number(record.id);
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const payload: Record<string, unknown> = {};
+      for (const f of fields) {
+        const v = values[f.key];
+        if (f.numeric) {
+          if (v === "") payload[f.key] = "";
+          else {
+            const n = Number(v.replace(/\s/g, "").replace(/,/g, "."));
+            if (Number.isFinite(n)) payload[f.key] = n;
+          }
+        } else {
+          payload[f.key] = v;
+        }
+      }
+      const res = await fetch(TABLE_META[table].apiItem(id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setError(data.error ?? "Uložení selhalo.");
+      } else {
+        onSaved();
+        onClose();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4" onClick={onClose}>
+      <div
+        className="mt-12 w-full max-w-xl rounded-xl border border-border bg-bg-panel p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-white">
+            {TABLE_META[table].icon} Upravit záznam #{id}
+          </h3>
+          <button onClick={onClose} className="rounded px-2 py-0.5 text-xs text-text-dim hover:bg-bg-hover">✕</button>
+        </div>
+        <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+          {fields.map((f) => (
+            <div key={f.key}>
+              <label className="mb-1 block text-[11px] font-medium text-text-dim">
+                {f.label}{f.hint ? <span className="ml-2 font-normal text-text-dim/70">{f.hint}</span> : null}
+              </label>
+              {f.textarea ? (
+                <textarea
+                  value={values[f.key] ?? ""}
+                  onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                  rows={3}
+                  className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-xs text-text focus:border-accent focus:outline-none"
+                />
+              ) : (
+                <input
+                  type="text"
+                  value={values[f.key] ?? ""}
+                  onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                  className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-xs text-text focus:border-accent focus:outline-none"
+                />
+              )}
+            </div>
+          ))}
+        </div>
+        {error && (
+          <div className="mt-3 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>
+        )}
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button onClick={onClose} disabled={busy} className="rounded-lg border border-border bg-bg px-3 py-1.5 text-xs text-text hover:border-accent disabled:opacity-50">Zrušit</button>
+          <button onClick={save} disabled={busy} className="rounded-lg bg-accent px-4 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50">
+            {busy ? "Ukládám…" : "Uložit"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type EditField = { key: string; label: string; hint?: string; numeric?: boolean; textarea?: boolean };
+
+const EDIT_FIELDS: Record<TableKey, EditField[]> = {
+  clients: [
+    { key: "name", label: "Jméno" },
+    { key: "email", label: "Email" },
+    { key: "phone", label: "Telefon" },
+    { key: "source", label: "Zdroj", hint: "web / doporučení / inzerát / sociální sítě" },
+    { key: "budget_min", label: "Rozpočet od", numeric: true },
+    { key: "budget_max", label: "Rozpočet do", numeric: true },
+    { key: "preferred_locality", label: "Preferovaná lokalita" },
+    { key: "preferred_rooms", label: "Dispozice" },
+    { key: "preferred_type", label: "Typ" },
+    { key: "notes", label: "Poznámky", textarea: true },
+  ],
+  properties: [
+    { key: "address", label: "Adresa" },
+    { key: "city", label: "Město" },
+    { key: "district", label: "Čtvrť" },
+    { key: "type", label: "Typ", hint: "byt / dům / komerční" },
+    { key: "price", label: "Cena (Kč)", numeric: true },
+    { key: "area_m2", label: "Plocha (m²)", numeric: true },
+    { key: "rooms", label: "Pokoje", numeric: true },
+    { key: "status", label: "Stav", hint: "aktivní / prodáno / rezervováno" },
+    { key: "description", label: "Popis", textarea: true },
+    { key: "reconstruction_data", label: "Rekonstrukce", textarea: true },
+    { key: "building_modifications", label: "Stavební úpravy", textarea: true },
+  ],
+  leads: [
+    { key: "client_id", label: "Klient (id)", numeric: true },
+    { key: "property_id", label: "Nemovitost (id)", numeric: true },
+    { key: "status", label: "Stav", hint: "nový / kontaktován / prohlídka / nabídka / uzavřen" },
+    { key: "source", label: "Zdroj" },
+    { key: "last_contact_at", label: "Posl. kontakt" },
+    { key: "next_action", label: "Další krok" },
+    { key: "estimated_commission", label: "Odhad provize", numeric: true },
+  ],
+  transactions: [
+    { key: "property_id", label: "Nemovitost (id)", numeric: true },
+    { key: "client_id", label: "Klient (id)", numeric: true },
+    { key: "sale_price", label: "Prodejní cena", numeric: true },
+    { key: "commission", label: "Provize", numeric: true },
+    { key: "transaction_date", label: "Datum (YYYY-MM-DD)" },
+  ],
+  calendar: [
+    { key: "title", label: "Název" },
+    { key: "start_time", label: "Začátek" },
+    { key: "end_time", label: "Konec" },
+    { key: "type", label: "Typ", hint: "prohlídka / meeting / hovor / jiné" },
+    { key: "location", label: "Místo" },
+    { key: "notes", label: "Poznámky", textarea: true },
+    { key: "client_id", label: "Klient (id)", numeric: true },
+    { key: "property_id", label: "Nemovitost (id)", numeric: true },
+  ],
+};
+
+const LIST_COLUMNS: Record<TableKey, Array<{ key: string; label: string; fmt?: (v: unknown) => string }>> = {
+  clients: [
+    { key: "id", label: "#" },
+    { key: "name", label: "Jméno" },
+    { key: "email", label: "Email" },
+    { key: "phone", label: "Telefon" },
+    { key: "source", label: "Zdroj" },
+  ],
+  properties: [
+    { key: "id", label: "#" },
+    { key: "address", label: "Adresa" },
+    { key: "city", label: "Město" },
+    { key: "type", label: "Typ" },
+    { key: "price", label: "Cena", fmt: (v) => typeof v === "number" ? `${v.toLocaleString("cs-CZ")} Kč` : String(v ?? "") },
+    { key: "status", label: "Stav" },
+  ],
+  leads: [
+    { key: "id", label: "#" },
+    { key: "client_id", label: "Klient" },
+    { key: "property_id", label: "Nemovitost" },
+    { key: "status", label: "Stav" },
+    { key: "source", label: "Zdroj" },
+    { key: "last_contact_at", label: "Posl. kontakt" },
+  ],
+  transactions: [
+    { key: "id", label: "#" },
+    { key: "property_id", label: "Nemovitost" },
+    { key: "client_id", label: "Klient" },
+    { key: "sale_price", label: "Cena", fmt: (v) => typeof v === "number" ? `${v.toLocaleString("cs-CZ")} Kč` : String(v ?? "") },
+    { key: "commission", label: "Provize", fmt: (v) => typeof v === "number" ? `${v.toLocaleString("cs-CZ")} Kč` : String(v ?? "") },
+    { key: "transaction_date", label: "Datum" },
+  ],
+  calendar: [
+    { key: "id", label: "#" },
+    { key: "title", label: "Název" },
+    { key: "start_time", label: "Začátek" },
+    { key: "end_time", label: "Konec" },
+    { key: "type", label: "Typ" },
+    { key: "location", label: "Místo" },
+  ],
+};
+
+type ReplacePromptState = { file: File; existingCount: number } | null;
+
 function ImportSection({ table }: { table: TableKey }) {
   const meta = TABLE_META[table];
   const fields = FIELD_DEFS[table];
@@ -120,14 +366,38 @@ function ImportSection({ table }: { table: TableKey }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CommitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [strategy, setStrategy] = useState<"append" | "replace">("append");
+  const [replacePrompt, setReplacePrompt] = useState<ReplacePromptState>(null);
 
-  const onFile = async (f: File | null) => {
-    setFile(f);
+  const [records, setRecords] = useState<Array<Record<string, unknown>>>([]);
+  const [recordsLoading, setRecordsLoading] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [editing, setEditing] = useState<Record<string, unknown> | null>(null);
+  const [clearBusy, setClearBusy] = useState(false);
+
+  const refreshRecords = useCallback(async () => {
+    setRecordsLoading(true);
+    try {
+      const r = await fetch(meta.apiList, { cache: "no-store" });
+      const d = await r.json();
+      const list: unknown = d?.[meta.listKey];
+      setRecords(Array.isArray(list) ? (list as Array<Record<string, unknown>>) : []);
+    } catch {
+      setRecords([]);
+    } finally {
+      setRecordsLoading(false);
+    }
+  }, [meta.apiList, meta.listKey]);
+
+  useEffect(() => {
+    refreshRecords();
+  }, [refreshRecords]);
+
+  const parseFile = async (f: File) => {
     setPreview(null);
     setResult(null);
     setError(null);
     setMapping({});
-    if (!f) return;
     setBusy(true);
     try {
       const buf = await f.arrayBuffer();
@@ -151,19 +421,10 @@ function ImportSection({ table }: { table: TableKey }) {
       const order: string[] = [];
       for (const r of raw) {
         for (const k of Object.keys(r)) {
-          if (!colsSet.has(k)) {
-            colsSet.add(k);
-            order.push(k);
-          }
+          if (!colsSet.has(k)) { colsSet.add(k); order.push(k); }
         }
       }
-      const p: Preview = {
-        columns: order,
-        sample: raw.slice(0, 5),
-        rows: raw,
-        total: raw.length,
-        sheetName,
-      };
+      const p: Preview = { columns: order, sample: raw.slice(0, 5), rows: raw, total: raw.length, sheetName };
       setPreview(p);
       setMapping(autoGuessMapping(p.columns, fields));
     } catch (e) {
@@ -171,6 +432,29 @@ function ImportSection({ table }: { table: TableKey }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const onFile = async (f: File | null) => {
+    setFile(f);
+    if (!f) {
+      setPreview(null);
+      return;
+    }
+    if (records.length > 0) {
+      // Ukáže dialog — uživatel zvolí append nebo replace
+      setReplacePrompt({ file: f, existingCount: records.length });
+      return;
+    }
+    setStrategy("append");
+    await parseFile(f);
+  };
+
+  const confirmStrategy = async (chosen: "append" | "replace") => {
+    const f = replacePrompt?.file;
+    setReplacePrompt(null);
+    if (!f) return;
+    setStrategy(chosen);
+    await parseFile(f);
   };
 
   const doImport = async () => {
@@ -191,6 +475,7 @@ function ImportSection({ table }: { table: TableKey }) {
           table: meta.endpointTable,
           mapping,
           rows: preview.rows,
+          strategy,
         }),
       });
       const data = await res.json();
@@ -203,7 +488,9 @@ function ImportSection({ table }: { table: TableKey }) {
           skipped: data.skipped ?? 0,
           error_count: data.error_count ?? 0,
           errors: data.errors ?? [],
+          strategy: data.strategy,
         });
+        await refreshRecords();
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -212,12 +499,50 @@ function ImportSection({ table }: { table: TableKey }) {
     }
   };
 
+  const deleteRecord = async (id: number) => {
+    if (!window.confirm(`Smazat záznam #${id}?`)) return;
+    try {
+      const res = await fetch(meta.apiItem(id), { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        alert(`Chyba: ${data.error ?? res.status}`);
+      } else {
+        await refreshRecords();
+      }
+    } catch (e) {
+      alert(`Chyba: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const clearCategory = async () => {
+    if (!window.confirm(`Opravdu smazat VŠECHNY záznamy v kategorii „${meta.title}"?\nTato akce je nevratná.`)) return;
+    setClearBusy(true);
+    try {
+      const res = await fetch("/api/data/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "SMAZAT", table: meta.endpointTable }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        alert(`Chyba: ${data.error ?? res.status}`);
+      } else {
+        await refreshRecords();
+      }
+    } catch (e) {
+      alert(`Chyba: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setClearBusy(false);
+    }
+  };
+
+  const visibleRecords = showAll ? records : records.slice(0, 10);
+  const columns = LIST_COLUMNS[table];
+
   return (
     <div className="rounded-xl border border-border bg-bg-panel p-5">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold text-white">
-          {meta.icon} {meta.title}
-        </h2>
+        <h2 className="text-sm font-semibold text-white">{meta.icon} {meta.title}</h2>
         <a
           href={`/api/import/template?table=${meta.endpointTable}`}
           className="rounded-lg border border-border bg-bg px-3 py-1.5 text-xs text-text hover:border-accent"
@@ -238,18 +563,52 @@ function ImportSection({ table }: { table: TableKey }) {
         </p>
       </div>
 
-      {busy && <div className="text-xs text-text-dim">…zpracovávám</div>}
+      {busy && <div className="mb-2 text-xs text-text-dim">…zpracovávám</div>}
       {error && (
         <div className="mb-3 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2 text-xs text-red-300">
           {error}
         </div>
       )}
 
+      {replacePrompt && (
+        <div className="mb-3 rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3 text-xs text-yellow-100">
+          <div className="mb-2 font-medium">
+            V kategorii je {replacePrompt.existingCount} existujících záznamů. Chcete nové přidat, nebo všechny nahradit?
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => confirmStrategy("append")}
+              className="rounded-lg border border-border bg-bg px-3 py-1.5 text-xs text-text hover:border-accent"
+            >
+              ➕ Přidat k existujícím
+            </button>
+            <button
+              onClick={() => confirmStrategy("replace")}
+              className="rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-1.5 text-xs text-red-200 hover:bg-red-500/20"
+            >
+              🔄 Nahradit všechna data
+            </button>
+            <button
+              onClick={() => { setReplacePrompt(null); setFile(null); }}
+              className="rounded-lg border border-border bg-bg px-3 py-1.5 text-xs text-text-dim hover:border-accent"
+            >
+              Zrušit
+            </button>
+          </div>
+        </div>
+      )}
+
       {preview && (
         <>
-          <div className="mb-3 text-xs text-text-dim">
-            Detekováno <strong className="text-text">{preview.total}</strong> záznamů v listu{" "}
-            <code className="rounded bg-bg px-1">{preview.sheetName}</code>.
+          <div className="mb-3 flex items-center justify-between gap-2 text-xs text-text-dim">
+            <div>
+              Detekováno <strong className="text-text">{preview.total}</strong> záznamů v listu{" "}
+              <code className="rounded bg-bg px-1">{preview.sheetName}</code>.
+            </div>
+            <div className="rounded px-2 py-0.5 text-[11px]"
+              style={{ background: strategy === "replace" ? "rgba(239,68,68,0.15)" : "rgba(59,130,246,0.15)", color: strategy === "replace" ? "#fca5a5" : "#93c5fd" }}>
+              Režim: {strategy === "replace" ? "nahradit vše" : "přidat"}
+            </div>
           </div>
 
           <div className="mb-4">
@@ -292,9 +651,7 @@ function ImportSection({ table }: { table: TableKey }) {
                     {preview.columns.map((c) => (
                       <th key={c} className="border-b border-border px-2 py-1 text-left text-text-dim">
                         {c}
-                        {mapping[c] && (
-                          <span className="ml-1 text-[10px] text-accent">→ {mapping[c]}</span>
-                        )}
+                        {mapping[c] && <span className="ml-1 text-[10px] text-accent">→ {mapping[c]}</span>}
                       </th>
                     ))}
                   </tr>
@@ -324,7 +681,7 @@ function ImportSection({ table }: { table: TableKey }) {
               Importovat {preview.total} záznamů
             </button>
             <div className="text-[11px] text-text-dim">
-              Povinné pole označené <span className="text-accent">*</span> musí mít namapovaný sloupec.
+              Povinné pole <span className="text-accent">*</span> musí mít namapovaný sloupec.
             </div>
           </div>
         </>
@@ -335,25 +692,117 @@ function ImportSection({ table }: { table: TableKey }) {
           <div className="font-medium">
             ✓ Importováno {result.inserted} záznamů
             {result.skipped > 0 && ` · ${result.skipped} přeskočeno (duplicity)`}
-            {result.error_count - result.skipped > 0 &&
-              ` · ${result.error_count - result.skipped} chyb`}
+            {result.error_count - result.skipped > 0 && ` · ${result.error_count - result.skipped} chyb`}
+            {result.strategy === "replace" && ` · původní data nahrazena`}
             .
           </div>
           {result.errors.length > 0 && (
             <details className="mt-2">
-              <summary className="cursor-pointer text-text-dim">
-                Ukázat chyby ({result.errors.length})
-              </summary>
+              <summary className="cursor-pointer text-text-dim">Ukázat chyby ({result.errors.length})</summary>
               <ul className="mt-2 space-y-0.5">
                 {result.errors.map((e, i) => (
-                  <li key={i} className="text-text-dim">
-                    Řádek {e.row}: {e.error}
-                  </li>
+                  <li key={i} className="text-text-dim">Řádek {e.row}: {e.error}</li>
                 ))}
               </ul>
             </details>
           )}
         </div>
+      )}
+
+      {/* Správa importovaných dat */}
+      <div className="mt-6 border-t border-border pt-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-xs font-medium text-text">
+            Aktuálně v databázi: <strong className="text-text">{records.length}</strong> záznamů
+          </h3>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={refreshRecords}
+              disabled={recordsLoading}
+              className="rounded-lg border border-border bg-bg px-2 py-1 text-[11px] text-text-dim hover:border-accent disabled:opacity-50"
+            >
+              {recordsLoading ? "…" : "↻ Obnovit"}
+            </button>
+            {records.length > 0 && (
+              <button
+                onClick={clearCategory}
+                disabled={clearBusy}
+                className="rounded-lg border border-red-500/50 bg-red-500/10 px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+              >
+                🗑 Smazat vše v této kategorii
+              </button>
+            )}
+          </div>
+        </div>
+
+        {records.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border bg-bg/30 p-4 text-center text-[11px] text-text-dim">
+            Žádné záznamy. Nahrajte soubor výše pro přidání dat.
+          </div>
+        ) : (
+          <>
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="min-w-full text-[11px]">
+                <thead className="bg-bg-sidebar">
+                  <tr>
+                    {columns.map((c) => (
+                      <th key={c.key} className="border-b border-border px-2 py-1 text-left text-text-dim">
+                        {c.label}
+                      </th>
+                    ))}
+                    <th className="border-b border-border px-2 py-1 text-right text-text-dim">Akce</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRecords.map((r, i) => (
+                    <tr
+                      key={Number(r.id) ?? i}
+                      className="cursor-pointer odd:bg-bg-sidebar/40 hover:bg-accent/10"
+                      onClick={() => setEditing(r)}
+                    >
+                      {columns.map((c) => {
+                        const v = r[c.key];
+                        const display = c.fmt ? c.fmt(v) : v === null || v === undefined ? "" : String(v);
+                        return (
+                          <td key={c.key} className="border-b border-border px-2 py-1 text-text">
+                            {display}
+                          </td>
+                        );
+                      })}
+                      <td className="border-b border-border px-2 py-1 text-right">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); deleteRecord(Number(r.id)); }}
+                          className="rounded border border-red-500/50 bg-red-500/10 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-500/20"
+                        >
+                          Smazat
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {records.length > 10 && (
+              <div className="mt-2 text-center">
+                <button
+                  onClick={() => setShowAll((s) => !s)}
+                  className="text-[11px] text-accent hover:underline"
+                >
+                  {showAll ? `↑ Skrýt (zobrazeno ${records.length})` : `↓ Zobrazit vše (${records.length})`}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {editing && (
+        <EditModal
+          table={table}
+          record={editing}
+          onClose={() => setEditing(null)}
+          onSaved={refreshRecords}
+        />
       )}
     </div>
   );
@@ -368,13 +817,20 @@ export default function ImportPage() {
 
   const refreshMode = useCallback(async () => {
     try {
-      const r = await fetch("/api/mode");
+      const r = await fetch("/api/mode", { cache: "no-store" });
       const d = await r.json();
-      if (d?.ok) setMode(d.mode);
+      if (d?.ok) {
+        setMode(d.mode);
+        try { localStorage.setItem("realitka-mode", d.mode); } catch {}
+      }
     } catch {}
   }, []);
 
   useEffect(() => {
+    try {
+      const cached = localStorage.getItem("realitka-mode");
+      if (cached === "test" || cached === "prod") setMode(cached);
+    } catch {}
     refreshMode();
   }, [refreshMode]);
 
@@ -392,8 +848,9 @@ export default function ImportPage() {
         setModeMsg(`Chyba: ${d.error ?? r.status}`);
       } else {
         setMode(d.mode);
-        if (action === "enter_test") setModeMsg("✓ Testovací prostředí vytvořeno.");
-        if (action === "exit_test_discard") setModeMsg("✓ Test ukončen, změny zahozeny.");
+        try { localStorage.setItem("realitka-mode", d.mode); } catch {}
+        if (action === "enter_test") setModeMsg("✓ Testovací prostředí vytvořeno (test_ tabulky v Turso).");
+        if (action === "exit_test_discard") setModeMsg("✓ Test ukončen, test_ tabulky smazány.");
         if (action === "exit_test_commit") setModeMsg("✓ Testovací data nahradila produkční.");
       }
     } catch (e) {
@@ -440,29 +897,23 @@ export default function ImportPage() {
     <div className="min-h-screen bg-bg text-text">
       {mode === "test" && (
         <div className="border-b border-yellow-500/40 bg-yellow-500/15 px-6 py-2 text-center text-xs font-medium text-yellow-200">
-          🧪 TESTOVACÍ REŽIM — změny neovlivní produkční data
+          🧪 TESTOVACÍ REŽIM — dotazy jdou na test_ tabulky, produkční data nejsou ovlivněna
         </div>
       )}
 
       <header className="border-b border-border px-6 py-4">
         <div className="mx-auto flex max-w-4xl items-center justify-between">
           <div>
-            <h1 className="text-lg font-semibold text-white">Import dat</h1>
+            <h1 className="text-lg font-semibold text-white">Import a správa dat</h1>
             <p className="text-xs text-text-dim">
-              Nahrát reálná data z CSV, vytvořit testovací prostředí nebo smazat demo data.
+              Nahrát soubory, upravit záznamy nebo přepnout testovací režim.
             </p>
           </div>
           <div className="flex gap-2">
-            <Link
-              href="/settings"
-              className="rounded-lg border border-border bg-bg-panel px-3 py-1.5 text-xs text-text hover:border-accent hover:bg-bg-hover"
-            >
+            <Link href="/settings" className="rounded-lg border border-border bg-bg-panel px-3 py-1.5 text-xs text-text hover:border-accent hover:bg-bg-hover">
               Nastavení
             </Link>
-            <Link
-              href="/"
-              className="rounded-lg border border-border bg-bg-panel px-3 py-1.5 text-xs text-text hover:border-accent hover:bg-bg-hover"
-            >
+            <Link href="/" className="rounded-lg border border-border bg-bg-panel px-3 py-1.5 text-xs text-text hover:border-accent hover:bg-bg-hover">
               ← Zpět do chatu
             </Link>
           </div>
@@ -474,17 +925,14 @@ export default function ImportPage() {
         <section className="rounded-xl border border-border bg-bg-sidebar p-5">
           <div className="mb-2 flex items-center justify-between gap-3">
             <h2 className="text-sm font-semibold text-white">🧪 Testovací režim</h2>
-            <span
-              className={`rounded px-2 py-0.5 text-[11px] font-medium ${
-                mode === "test" ? "bg-yellow-500/20 text-yellow-200" : "bg-green-500/15 text-green-300"
-              }`}
-            >
+            <span className={`rounded px-2 py-0.5 text-[11px] font-medium ${mode === "test" ? "bg-yellow-500/20 text-yellow-200" : "bg-green-500/15 text-green-300"}`}>
               {mode === "test" ? "aktivní" : "produkční režim"}
             </span>
           </div>
           <p className="mb-3 text-xs text-text-dim">
-            Vytvoří kopii aktuální databáze pod <code className="rounded bg-bg px-1">test_database.db</code>.
-            V testovacím režimu můžete nahrávat soubory a přidávat záznamy přes chat bez ovlivnění produkčních dat.
+            Vytvoří v Turso kopii produkčních tabulek pod prefixem <code className="rounded bg-bg px-1">test_</code>
+            {" "}(test_clients, test_properties, …). V testovacím režimu všechny zápisy i čtení jdou na tyto tabulky,
+            takže si můžete zkoušet změny bez ovlivnění produkčních dat.
           </p>
           {mode === "prod" ? (
             <button
@@ -493,7 +941,7 @@ export default function ImportPage() {
               onClick={() => modeAction("enter_test")}
               className="rounded-lg border border-yellow-500/50 bg-yellow-500/10 px-3 py-1.5 text-xs text-yellow-200 hover:bg-yellow-500/20 disabled:opacity-50"
             >
-              🧪 Vytvořit testovací prostředí
+              🧪 {modeBusy ? "Vytvářím…" : "Vytvořit testovací prostředí"}
             </button>
           ) : (
             <div className="flex flex-wrap gap-2">
@@ -503,15 +951,13 @@ export default function ImportPage() {
                 onClick={() => modeAction("exit_test_discard")}
                 className="rounded-lg border border-border bg-bg-panel px-3 py-1.5 text-xs text-text hover:border-accent disabled:opacity-50"
               >
-                ✗ Ukončit test a zahodit změny
+                ✗ Ukončit test a smazat test_ tabulky
               </button>
               <button
                 type="button"
                 disabled={modeBusy}
                 onClick={async () => {
-                  const ok = window.confirm(
-                    "Opravdu chcete nahradit PRODUKČNÍ data testovací databází? Tato akce je nevratná.",
-                  );
+                  const ok = window.confirm("Opravdu chcete nahradit PRODUKČNÍ data daty z test_ tabulek? Tato akce je nevratná.");
                   if (ok) modeAction("exit_test_commit");
                 }}
                 className="rounded-lg border border-green-500/50 bg-green-500/10 px-3 py-1.5 text-xs text-green-300 hover:bg-green-500/20 disabled:opacity-50"
@@ -526,13 +972,14 @@ export default function ImportPage() {
         <ImportSection table="clients" />
         <ImportSection table="properties" />
         <ImportSection table="leads" />
+        <ImportSection table="transactions" />
+        <ImportSection table="calendar" />
 
-        {/* Reset demo dat */}
+        {/* Reset všech dat */}
         <section className="rounded-xl border border-red-500/30 bg-red-500/5 p-5">
           <h2 className="mb-1 text-sm font-semibold text-red-300">🗑️ Reset databáze</h2>
           <p className="mb-3 text-xs text-text-dim">
-            Smaže všechna data — klienty, nemovitosti, leady, transakce i kalendář. Použijte před
-            ostrým nasazením, abyste začínali s čistou databází.
+            Smaže všechna data — klienty, nemovitosti, leady, transakce i kalendář. Použijte před ostrým nasazením.
           </p>
           <button
             type="button"
