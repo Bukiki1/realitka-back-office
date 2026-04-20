@@ -729,6 +729,7 @@ export function initSchema() {
   db.exec(SCHEMA);
   for (const m of MIGRATIONS) ensureColumnSync(db, m.table, m.column, m.type);
   migrateLeadsNullableFkSync(db);
+  migrateTransactionsNullableFkSync(db);
   db.exec(INDEXES);
 }
 

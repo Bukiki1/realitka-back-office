@@ -1,6 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import * as cheerio from "cheerio";
-import { getDb, dbRun, ensureLocalReady } from "./db";
+import { getDb, dbRun, dbAll, ensureLocalReady } from "./db";
 
 export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
@@ -576,7 +576,7 @@ export async function runTool(name: string, input: Record<string, unknown>): Pro
     await ensureLocalReady();
     switch (name) {
       case "query_database":
-        return toolQueryDatabase(input);
+        return await toolQueryDatabase(input);
       case "generate_chart":
         return toolGenerateChart(input);
       case "find_missing_data":
@@ -643,17 +643,18 @@ export async function runTool(name: string, input: Record<string, unknown>): Pro
   }
 }
 
-function toolQueryDatabase(input: Record<string, unknown>): ToolResult {
+async function toolQueryDatabase(input: Record<string, unknown>): Promise<ToolResult> {
   const sql = String(input.sql ?? "");
   if (!sql) return { ok: false, error: "Chybí parametr sql." };
   if (!isSelectOnly(sql)) {
     return { ok: false, error: "Pouze read-only SELECT / WITH dotazy jsou povoleny." };
   }
-  const db = getDb();
-  const stmt = db.prepare(sql);
-  const rows = stmt.all();
-  const limited = Array.isArray(rows) ? rows.slice(0, 200) : rows;
-  return { ok: true, data: { row_count: Array.isArray(rows) ? rows.length : 0, rows: limited } };
+  // Čteme napřímo z Turso (dbAll) — dbAll přesměruje na libsql klient, pokud je
+  // Turso nakonfigurováno. Tím agent vidí identická data jako /api/data/* a REST
+  // endpointy a nekouká na stale /tmp mirror.
+  const rows = await dbAll<Record<string, unknown>>(sql);
+  const limited = rows.slice(0, 200);
+  return { ok: true, data: { row_count: rows.length, rows: limited } };
 }
 
 export const CHART_PALETTE = ["#2563EB", "#10B981", "#F59E0B", "#6366F1", "#EC4899"];
