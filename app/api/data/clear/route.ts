@@ -28,11 +28,16 @@ export async function POST(req: Request) {
   try {
     if (singleTable) {
       const before = await count(singleTable);
-      // Při mazání rodičovských tabulek nejdřív vyčistit závislé leads/transakce.
+      // Závislé záznamy mažeme vždy před nadřazenými. Kalendářní události
+      // zachováme a jen u nich vynulujeme client_id / property_id.
       if (singleTable === "clients") {
-        await dbExec(`DELETE FROM transactions; DELETE FROM leads; DELETE FROM clients;`);
+        await dbExec(
+          `DELETE FROM transactions; DELETE FROM leads; UPDATE calendar_events SET client_id = NULL; DELETE FROM clients;`,
+        );
       } else if (singleTable === "properties") {
-        await dbExec(`DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties;`);
+        await dbExec(
+          `DELETE FROM transactions; DELETE FROM leads; UPDATE calendar_events SET property_id = NULL; DELETE FROM properties;`,
+        );
       } else {
         await dbExec(`DELETE FROM ${singleTable};`);
       }
@@ -47,7 +52,9 @@ export async function POST(req: Request) {
       transactions: await count("transactions"),
       calendar_events: await count("calendar_events"),
     };
-    await dbExec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;`);
+    // Pořadí dle uživatelské specifikace: calendar_events → leads → transactions → clients → properties.
+    // Kalendář mažeme celý (bulk clear), takže FK vynulování nepotřebujeme.
+    await dbExec(`DELETE FROM calendar_events; DELETE FROM leads; DELETE FROM transactions; DELETE FROM clients; DELETE FROM properties;`);
     await dbExec(`DELETE FROM sqlite_sequence WHERE name IN ('clients','properties','leads','transactions','calendar_events');`);
     return NextResponse.json({ ok: true, cleared: before });
   } catch (e: unknown) {

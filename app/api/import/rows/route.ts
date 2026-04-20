@@ -178,10 +178,16 @@ function hasPropertyHint(row: Record<string, unknown>): boolean {
 }
 
 async function clearTable(table: TableName): Promise<void> {
+  // Závislé záznamy mažeme vždy před nadřazenými. Kalendářní události zachováme
+  // a jen u nich vynulujeme client_id / property_id.
   if (table === "clients") {
-    await dbExec(`DELETE FROM transactions; DELETE FROM leads; DELETE FROM clients;`);
+    await dbExec(
+      `DELETE FROM transactions; DELETE FROM leads; UPDATE calendar_events SET client_id = NULL; DELETE FROM clients;`,
+    );
   } else if (table === "properties") {
-    await dbExec(`DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties;`);
+    await dbExec(
+      `DELETE FROM transactions; DELETE FROM leads; UPDATE calendar_events SET property_id = NULL; DELETE FROM properties;`,
+    );
   } else {
     await dbExec(`DELETE FROM ${table};`);
   }

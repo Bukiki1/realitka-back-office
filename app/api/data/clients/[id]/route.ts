@@ -35,7 +35,11 @@ export async function DELETE(_req: Request, { params }: { params: { id: string }
   await ensureLocalReady();
   const id = Number(params.id);
   if (!Number.isFinite(id)) return NextResponse.json({ ok: false, error: "Neplatné id." }, { status: 400 });
+  // Závislé záznamy nejdřív: transakce → leady. Kalendářní události zachováme,
+  // jen u nich vynulujeme client_id (event není "dependent" na klientovi).
+  await dbRun(`DELETE FROM transactions WHERE client_id = ?`, [id]);
   await dbRun(`DELETE FROM leads WHERE client_id = ?`, [id]);
+  await dbRun(`UPDATE calendar_events SET client_id = NULL WHERE client_id = ?`, [id]);
   await dbRun(`DELETE FROM clients WHERE id = ?`, [id]);
   return NextResponse.json({ ok: true, id });
 }
