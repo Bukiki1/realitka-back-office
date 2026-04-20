@@ -580,11 +580,11 @@ export async function runTool(name: string, input: Record<string, unknown>): Pro
       case "generate_chart":
         return toolGenerateChart(input);
       case "find_missing_data":
-        return toolFindMissingData(input);
+        return await toolFindMissingData(input);
       case "generate_report":
         return toolGenerateReport(input);
       case "search_properties":
-        return toolSearchProperties(input);
+        return await toolSearchProperties(input);
       case "draft_email":
         return toolDraftEmail(input);
       case "generate_weekly_report":
@@ -772,28 +772,29 @@ function toolGenerateChart(input: Record<string, unknown>): ToolResult {
   };
 }
 
-function toolFindMissingData(input: Record<string, unknown>): ToolResult {
+async function toolFindMissingData(input: Record<string, unknown>): Promise<ToolResult> {
   const field = String(input.field ?? "any");
   const limit = typeof input.limit === "number" ? Math.min(Math.max(input.limit, 1), 200) : 50;
-  const db = getDb();
 
   let where = "";
   if (field === "reconstruction_data") where = "reconstruction_data IS NULL";
   else if (field === "building_modifications") where = "building_modifications IS NULL";
-  else where = "reconstruction_data IS NULL OR building_modifications IS NULL";
+  else where = "(reconstruction_data IS NULL OR building_modifications IS NULL)";
 
-  const rows = db.prepare(
+  const rows = await dbAll<Record<string, unknown>>(
     `SELECT id, address, city, district, type, price, area_m2, status,
             reconstruction_data, building_modifications
      FROM properties
      WHERE ${where}
-     ORDER BY created_at DESC
-     LIMIT ?`
-  ).all(limit);
+     ORDER BY price DESC, created_at DESC
+     LIMIT ?`,
+    [limit],
+  );
 
-  const total = (db.prepare(
-    `SELECT COUNT(*) AS c FROM properties WHERE ${where}`
-  ).get() as { c: number }).c;
+  const countRows = await dbAll<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM properties WHERE ${where}`,
+  );
+  const total = countRows[0]?.c ?? 0;
 
   return { ok: true, data: { field, total_missing: total, returned: rows.length, rows } };
 }
@@ -809,7 +810,7 @@ function toolGenerateReport(input: Record<string, unknown>): ToolResult {
   return { ok: true, data: { markdown: md } };
 }
 
-function toolSearchProperties(input: Record<string, unknown>): ToolResult {
+async function toolSearchProperties(input: Record<string, unknown>): Promise<ToolResult> {
   const filters: string[] = [];
   const params: unknown[] = [];
 
@@ -825,13 +826,13 @@ function toolSearchProperties(input: Record<string, unknown>): ToolResult {
   params.push(limit);
 
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-  const db = getDb();
-  const rows = db.prepare(
+  const rows = await dbAll<Record<string, unknown>>(
     `SELECT id, address, city, district, type, price, area_m2, rooms, status, description
      FROM properties ${where}
      ORDER BY created_at DESC
-     LIMIT ?`
-  ).all(...params);
+     LIMIT ?`,
+    params,
+  );
 
   return { ok: true, data: { filters: input, count: rows.length, rows } };
 }
