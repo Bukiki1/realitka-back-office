@@ -13,7 +13,7 @@ import {
   type Provider,
 } from "@/lib/models";
 import { routeAuto } from "@/lib/router";
-import { ensureLocalReady } from "@/lib/db";
+import { ensureLocalReady, invalidateSnapshotCache } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -135,9 +135,13 @@ export async function POST(req: NextRequest) {
 
   // Zajistíme, že lokální /tmp SQLite mirror má aktuální data z Turso.
   // Synchronní nástroje (view_pipeline, match_clients_properties, …) čtou
-  // z tohoto mirror. Bez tohoto volání by po cold startu Vercel instance
-  // viděly prázdnou DB.
-  try { await ensureLocalReady(); } catch (err) {
+  // z tohoto mirror. Force-invalidate, aby warm Vercel lambda, která
+  // pullovala snapshot před posledním externím zápisem do Turso, stáhla
+  // data znovu.
+  try {
+    invalidateSnapshotCache();
+    await ensureLocalReady();
+  } catch (err) {
     console.warn("[chat] ensureLocalReady failed:", err instanceof Error ? err.message : err);
   }
 

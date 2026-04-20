@@ -141,6 +141,15 @@ export function getDb(): Database.Database {
   return db;
 }
 
+// Force-invalidate snapshot cache. Další ensureLocalReady() znovu pullne
+// z Turso. Používáme před chat requestem, protože synchronní nástroje
+// (view_pipeline, match_clients_properties) čtou z /tmp mirror a jinak
+// by viděly stará data, když Vercel lambda běží déle než poslední write.
+export function invalidateSnapshotCache(): void {
+  _snapshotReady = false;
+  _modeCachedAt = 0;
+}
+
 export function resetDbCache(): void {
   if (_db) {
     try { _db.close(); } catch {}
