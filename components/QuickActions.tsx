@@ -83,7 +83,7 @@ export const QUICK_ACTIONS: QuickAction[] = [
     title: "Chybějící data",
     subtitle: "Audit kompletnosti rekonstrukcí a úprav",
     prompt:
-      "Najdi nemovitosti s chybějícími údaji o rekonstrukci nebo stavebních úpravách. Seřaď je podle priority (vysoká/střední/nízká) podle hodnoty nemovitosti a na konci doporuč další kroky.",
+      "Zavolej nástroj find_missing_data (field=any) a vypiš konkrétní seznam prvních 20 nemovitostí s chybějícími daty jako markdown tabulku se sloupci: adresa, město, cena, co chybí. Nevracej jen souhrnné číslo — vypiš všechny položky, které nástroj vrátil. Na konci přidej krátké shrnutí (kolik celkem chybí v celé databázi) a doporuč další kroky.",
     icon: (
       <svg {...ICON_PROPS}>
         <path d="M12 9v4M12 17h.01M10.3 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />

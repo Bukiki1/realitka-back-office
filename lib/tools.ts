@@ -61,7 +61,7 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
     name: "find_missing_data",
     description:
-      "Najde nemovitosti, kde chybí důležitá data (reconstruction_data nebo building_modifications je NULL). Volitelně filtruj podle typu pole.",
+      "Najde konkrétní seznam nemovitostí, kde chybí reconstruction_data nebo building_modifications. Vrací maximálně 20 záznamů seřazených podle ceny sestupně (nejdražší první = vyšší priorita). DŮLEŽITÉ: v odpovědi uživateli vždy vypiš celý seznam (adresa, město, cena, co chybí) jako markdown seznam nebo tabulku, neskrývej ho za souhrnné číslo.",
     input_schema: {
       type: "object",
       properties: {
@@ -73,7 +73,7 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
         },
         limit: {
           type: "integer",
-          description: "Maximální počet vrácených záznamů (výchozí 50).",
+          description: "Maximální počet vrácených záznamů (výchozí i strop 20).",
         },
       },
       required: ["field"],
@@ -774,14 +774,28 @@ function toolGenerateChart(input: Record<string, unknown>): ToolResult {
 
 async function toolFindMissingData(input: Record<string, unknown>): Promise<ToolResult> {
   const field = String(input.field ?? "any");
-  const limit = typeof input.limit === "number" ? Math.min(Math.max(input.limit, 1), 200) : 50;
+  // Strop 20 — jinak agent dostane příliš dat a jen shrne místo aby vypsal.
+  const limit = typeof input.limit === "number" ? Math.min(Math.max(input.limit, 1), 20) : 20;
 
   let where = "";
   if (field === "reconstruction_data") where = "reconstruction_data IS NULL";
   else if (field === "building_modifications") where = "building_modifications IS NULL";
   else where = "(reconstruction_data IS NULL OR building_modifications IS NULL)";
 
-  const rows = await dbAll<Record<string, unknown>>(
+  type Row = {
+    id: number;
+    address: string;
+    city: string;
+    district: string | null;
+    type: string;
+    price: number;
+    area_m2: number;
+    status: string;
+    reconstruction_data: string | null;
+    building_modifications: string | null;
+  };
+
+  const rows = await dbAll<Row>(
     `SELECT id, address, city, district, type, price, area_m2, status,
             reconstruction_data, building_modifications
      FROM properties
@@ -796,7 +810,39 @@ async function toolFindMissingData(input: Record<string, unknown>): Promise<Tool
   );
   const total = countRows[0]?.c ?? 0;
 
-  return { ok: true, data: { field, total_missing: total, returned: rows.length, rows } };
+  // Derivujeme lidsky čitelný popis "co chybí" — agent to pak snadno vypíše.
+  const items = rows.map((r) => {
+    const missingFields: string[] = [];
+    if (r.reconstruction_data === null) missingFields.push("rekonstrukce");
+    if (r.building_modifications === null) missingFields.push("stavební úpravy");
+    const missing = missingFields.length === 2 ? "obojí (rekonstrukce + stavební úpravy)" : missingFields.join(", ");
+    return {
+      id: r.id,
+      address: r.address,
+      city: r.city,
+      district: r.district,
+      type: r.type,
+      price: r.price,
+      price_formatted: `${r.price.toLocaleString("cs-CZ")} Kč`,
+      area_m2: r.area_m2,
+      status: r.status,
+      missing,
+    };
+  });
+
+  return {
+    ok: true,
+    data: {
+      field,
+      total_missing: total,
+      returned: items.length,
+      note:
+        total > items.length
+          ? `Zobrazeno prvních ${items.length} z ${total} nemovitostí (seřazeno podle ceny sestupně). V odpovědi vypiš celý tento seznam.`
+          : `Všech ${items.length} nemovitostí s chybějícími daty. V odpovědi vypiš celý tento seznam.`,
+      items,
+    },
+  };
 }
 
 function toolGenerateReport(input: Record<string, unknown>): ToolResult {
