@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 import { dbGet, ensureLocalReady } from "@/lib/db";
-import { seed } from "@/lib/seed";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+// POZOR: tento endpoint pouze ověří, že je schéma připravené a vrátí aktuální
+// počty záznamů. NIKDY automaticky neseeduje — prázdná DB je validní stav.
+// Seed se spouští výhradně explicitně přes POST /api/seed (tlačítko v /import).
 
 async function allCounts() {
   const c = async (t: string): Promise<number> =>
@@ -13,27 +16,12 @@ async function allCounts() {
     properties: await c("properties"),
     leads: await c("leads"),
     transactions: await c("transactions"),
+    calendar_events: await c("calendar_events"),
   };
 }
 
-export async function GET(req: Request) {
+export async function GET() {
   await ensureLocalReady();
-  const url = new URL(req.url);
-  const force = url.searchParams.get("reseed") === "1";
-
   const counts = await allCounts();
-
-  // Automaticky re-seed, pokud chybí data z rozšířeného schématu.
-  let needsReseed = counts.clients === 0 || counts.properties === 0 || force;
-  if (!needsReseed && counts.leads > 0) {
-    const row = await dbGet<{ c: number }>(`SELECT COUNT(*) AS c FROM leads WHERE last_contact_at IS NOT NULL`);
-    if ((row?.c ?? 0) === 0) needsReseed = true;
-  }
-
-  if (needsReseed) {
-    await seed();
-    return NextResponse.json({ seeded: true, counts: await allCounts() });
-  }
-
-  return NextResponse.json({ seeded: false, counts });
+  return NextResponse.json({ ok: true, seeded: false, counts });
 }

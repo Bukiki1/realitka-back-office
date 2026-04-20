@@ -830,6 +830,8 @@ export default function ImportPage() {
   const [modeMsg, setModeMsg] = useState<string | null>(null);
   const [resetBusy, setResetBusy] = useState(false);
   const [resetMsg, setResetMsg] = useState<string | null>(null);
+  const [seedBusy, setSeedBusy] = useState(false);
+  const [seedMsg, setSeedMsg] = useState<string | null>(null);
 
   const refreshMode = useCallback(async () => {
     try {
@@ -906,6 +908,34 @@ export default function ImportPage() {
       setResetMsg(`Síťová chyba: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setResetBusy(false);
+    }
+  };
+
+  const doSeed = async () => {
+    const ok = window.confirm(
+      "Naplnit databázi demo daty? Přepíše všechny existující záznamy (50 klientů, 100 nemovitostí, 200 leadů, 30 transakcí).",
+    );
+    if (!ok) return;
+    setSeedBusy(true);
+    setSeedMsg("Plním…");
+    try {
+      const r = await fetch("/api/seed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "SEED" }),
+      });
+      const d = await r.json();
+      if (r.ok && d.ok) {
+        setSeedMsg(
+          `✓ Naplněno: klienti=${d.counts.clients}, nemovitosti=${d.counts.properties}, leady=${d.counts.leads}, transakce=${d.counts.transactions}, kalendář=${d.counts.calendar_events ?? 0}.`,
+        );
+      } else {
+        setSeedMsg(`Chyba: ${d.error ?? r.status}`);
+      }
+    } catch (e) {
+      setSeedMsg(`Síťová chyba: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSeedBusy(false);
     }
   };
 
@@ -990,6 +1020,28 @@ export default function ImportPage() {
         <ImportSection table="leads" />
         <ImportSection table="transactions" />
         <ImportSection table="calendar" />
+
+        {/* Demo data */}
+        <section className="rounded-xl border border-blue-500/30 bg-blue-500/5 p-5">
+          <h2 className="mb-1 text-sm font-semibold text-blue-300">🌱 Naplnit demo daty</h2>
+          <p className="mb-3 text-xs text-text-dim">
+            Naplní databázi 50 klienty, 100 nemovitostmi, 200 leady a 30 transakcemi pro demonstrační účely.
+            Databáze se nikdy neseeduje automaticky — prázdný stav je validní.
+          </p>
+          <button
+            type="button"
+            disabled={seedBusy}
+            onClick={doSeed}
+            className="rounded-lg border border-blue-500/50 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
+          >
+            {seedBusy ? "Plním…" : "Naplnit demo daty"}
+          </button>
+          {seedMsg && (
+            <div className={`mt-2 text-[11px] ${seedMsg.startsWith("✓") ? "text-green-400" : "text-text-dim"}`}>
+              {seedMsg}
+            </div>
+          )}
+        </section>
 
         {/* Reset všech dat */}
         <section className="rounded-xl border border-red-500/30 bg-red-500/5 p-5">
