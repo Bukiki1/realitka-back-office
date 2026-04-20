@@ -16,7 +16,7 @@ import { routeAuto } from "@/lib/router";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 30;
+export const maxDuration = 300;
 
 const MAX_AGENT_ROUNDS = 8;
 
