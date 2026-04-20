@@ -253,16 +253,26 @@ async function insertTransaction(row: Record<string, unknown>): Promise<TxInsert
     warnings.push("Klient nepárován, transakce importována bez vazby");
   }
 
-  const salePrice = typeof row.sale_price === "number" && Number.isFinite(row.sale_price)
+  // sale_price: chybějící/neplatná → 0 (transakce se importuje, jen s nulovou cenou).
+  const salePriceRaw = typeof row.sale_price === "number" && Number.isFinite(row.sale_price)
     ? Math.round(row.sale_price) : NaN;
-  const commission = typeof row.commission === "number" && Number.isFinite(row.commission)
+  const salePrice = Number.isFinite(salePriceRaw) && salePriceRaw > 0 ? salePriceRaw : 0;
+  if (salePrice === 0 && hasPropertyHint(row)) {
+    warnings.push("sale_price chybí nebo je 0, transakce importována s nulovou cenou");
+  }
+
+  // commission: Excel může doručit formuli, prázdno, null, text, NaN nebo záporné číslo.
+  // V těch případech dopočítáme 3 % ze sale_price; při sale_price = 0 → 0.
+  const commissionRaw = typeof row.commission === "number" && Number.isFinite(row.commission)
     ? Math.round(row.commission) : NaN;
-  if (!Number.isFinite(salePrice) || salePrice <= 0) {
-    return { ok: false, error: "sale_price musí být kladné." };
+  let commission: number;
+  if (!Number.isFinite(commissionRaw) || commissionRaw < 0) {
+    commission = salePrice > 0 ? Math.round(salePrice * 0.03) : 0;
+    warnings.push(`Provize dopočítána (3 % ze sale_price = ${commission.toLocaleString("cs-CZ")} Kč)`);
+  } else {
+    commission = commissionRaw;
   }
-  if (!Number.isFinite(commission) || commission < 0) {
-    return { ok: false, error: "commission musí být nezáporné." };
-  }
+
   const date = typeof row.transaction_date === "string" && row.transaction_date.trim()
     ? row.transaction_date.trim() : new Date().toISOString().slice(0, 10);
 
