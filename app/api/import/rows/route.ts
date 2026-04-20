@@ -23,6 +23,68 @@ const NUMERIC_FIELDS: Record<TableName, string[]> = {
   calendar_events: ["client_id", "property_id"],
 };
 
+const CALENDAR_TYPES = ["prohlídka", "meeting", "hovor", "jiné"] as const;
+
+// Přijme string v YYYY-MM-DD, DD.MM.YYYY, D/M/YYYY i ISO timestamp; vrátí YYYY-MM-DD nebo null.
+function normalizeDate(input: unknown): string | null {
+  if (!input) return null;
+  const s = String(input).trim();
+  if (!s) return null;
+  // ISO (může obsahovat čas): 2026-04-20[T ...]
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) {
+    const y = m[1], mo = m[2].padStart(2, "0"), d = m[3].padStart(2, "0");
+    return `${y}-${mo}-${d}`;
+  }
+  // DD.MM.YYYY nebo DD. MM. YYYY
+  m = s.match(/^(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/);
+  if (m) {
+    const d = m[1].padStart(2, "0"), mo = m[2].padStart(2, "0"), y = m[3];
+    return `${y}-${mo}-${d}`;
+  }
+  // DD/MM/YYYY
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) {
+    const d = m[1].padStart(2, "0"), mo = m[2].padStart(2, "0"), y = m[3];
+    return `${y}-${mo}-${d}`;
+  }
+  // Fallback: zkusit Date parser
+  const t = Date.parse(s);
+  if (!Number.isNaN(t)) {
+    const d = new Date(t);
+    const y = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${y}-${mo}-${dd}`;
+  }
+  return null;
+}
+
+// Přijme "9:00", "09:00", "09:00:00", "9h", "9.00" → "HH:MM" nebo null.
+function normalizeTime(input: unknown): string | null {
+  if (!input) return null;
+  const s = String(input).trim();
+  if (!s) return null;
+  const m = s.match(/^(\d{1,2})[:.hH](\d{1,2})/);
+  if (m) {
+    const h = Math.min(23, parseInt(m[1], 10));
+    const mi = Math.min(59, parseInt(m[2], 10));
+    return `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
+  }
+  const onlyH = s.match(/^(\d{1,2})\s*h?$/);
+  if (onlyH) {
+    const h = Math.min(23, parseInt(onlyH[1], 10));
+    return `${String(h).padStart(2, "0")}:00`;
+  }
+  return null;
+}
+
+function addHour(hhmm: string): string {
+  const [h, mi] = hhmm.split(":").map((x) => parseInt(x, 10));
+  const next = (h + 1) % 24;
+  return `${String(next).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
+}
+
 const LEAD_STATUSES = ["nový", "kontaktován", "prohlídka", "nabídka", "uzavřen"] as const;
 
 function applyMapping(
@@ -59,29 +121,86 @@ function coerceForTable(table: TableName, row: Record<string, unknown>): Record<
   return out;
 }
 
-async function insertCalendarEvent(row: Record<string, unknown>) {
+type CalInsertResult = { ok: true; warnings: string[] } | { ok: false; error: string };
+
+async function insertCalendarEvent(row: Record<string, unknown>): Promise<CalInsertResult> {
+  const warnings: string[] = [];
   const title = typeof row.title === "string" ? row.title.trim() : "";
-  const start_time = typeof row.start_time === "string" ? row.start_time.trim() : "";
-  const end_time = typeof row.end_time === "string" ? row.end_time.trim() : "";
-  const type = typeof row.type === "string" ? row.type : "meeting";
-  if (!title || !start_time || !end_time) {
-    throw new Error("Chybí title / start_time / end_time.");
+  if (!title) return { ok: false, error: "Chybí název události (title)." };
+
+  // 1) start_time: preferuj explicitní start_time; jinak slož datum + čas od (default 09:00).
+  let start_time = "";
+  if (typeof row.start_time === "string" && row.start_time.trim()) {
+    const raw = row.start_time.trim();
+    const d = normalizeDate(raw);
+    const tMatch = raw.match(/(\d{1,2}[:.hH]\d{1,2})/);
+    const t = tMatch ? normalizeTime(tMatch[1]) : null;
+    if (d) start_time = `${d} ${t ?? "09:00"}`;
+    else start_time = raw; // fallback — necháme beze změny
   }
-  await dbRun(
-    `INSERT INTO calendar_events (title, client_id, property_id, start_time, end_time, type, location, notes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      title,
-      typeof row.client_id === "number" ? row.client_id : null,
-      typeof row.property_id === "number" ? row.property_id : null,
-      start_time,
-      end_time,
-      type,
-      typeof row.location === "string" ? row.location : null,
-      typeof row.notes === "string" ? row.notes : null,
-      new Date().toISOString().slice(0, 19).replace("T", " "),
-    ],
-  );
+  if (!start_time) {
+    const d = normalizeDate(row.date);
+    if (!d) return { ok: false, error: "Chybí datum — povinné pole." };
+    const t = normalizeTime(row.time_from) ?? "09:00";
+    start_time = `${d} ${t}`;
+  }
+
+  // 2) end_time: explicitní, jinak datum + čas do (default start + 1h).
+  let end_time = "";
+  if (typeof row.end_time === "string" && row.end_time.trim()) {
+    const raw = row.end_time.trim();
+    const d = normalizeDate(raw);
+    const tMatch = raw.match(/(\d{1,2}[:.hH]\d{1,2})/);
+    const t = tMatch ? normalizeTime(tMatch[1]) : null;
+    if (d) end_time = `${d} ${t ?? addHour(start_time.slice(11, 16) || "09:00")}`;
+    else end_time = raw;
+  }
+  if (!end_time) {
+    const dateForEnd = normalizeDate(row.date) ?? start_time.slice(0, 10);
+    const startHm = start_time.slice(11, 16) || "09:00";
+    const t = normalizeTime(row.time_to) ?? addHour(startHm);
+    end_time = `${dateForEnd} ${t}`;
+  }
+
+  // 3) type: musí být z allowed setu; jinak default "meeting" s upozorněním.
+  const typeRaw = typeof row.type === "string" ? row.type.trim().toLowerCase() : "";
+  let type: string = "meeting";
+  if (typeRaw) {
+    const hit = CALENDAR_TYPES.find((t) => t.toLowerCase() === typeRaw);
+    if (hit) type = hit;
+    else warnings.push(`Neznámý typ "${row.type}" — použit default "meeting"`);
+  }
+
+  // 4) client_id / property_id: číselná vazba vyhraje; jinak LIKE podle client_name / property_address.
+  const clientId = await resolveClientId(row);
+  if (clientId === null && hasClientHint(row)) {
+    warnings.push("Klient nepárován, událost importována bez vazby");
+  }
+  const propertyId = await resolveProperty(row);
+  if (propertyId === null && hasPropertyHint(row)) {
+    warnings.push("Nemovitost nepárována, událost importována bez vazby");
+  }
+
+  try {
+    await dbRun(
+      `INSERT INTO calendar_events (title, client_id, property_id, start_time, end_time, type, location, notes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        title,
+        clientId,
+        propertyId,
+        start_time,
+        end_time,
+        type,
+        typeof row.location === "string" ? row.location : null,
+        typeof row.notes === "string" ? row.notes : null,
+        new Date().toISOString().slice(0, 19).replace("T", " "),
+      ],
+    );
+    return { ok: true, warnings };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 // Lead import: LIKE match pro klienta/nemovitost; pokud nenalezeno, zapíše se
@@ -377,8 +496,13 @@ export async function POST(req: Request) {
           errors.push({ row: i + 2, error: res.error });
         }
       } else if (table === "calendar_events") {
-        await insertCalendarEvent(input);
-        inserted++;
+        const res = await insertCalendarEvent(input);
+        if (res.ok) {
+          inserted++;
+          for (const w of res.warnings) warnings.push({ row: i + 2, warning: w });
+        } else {
+          errors.push({ row: i + 2, error: res.error });
+        }
       } else if (toolName) {
         const res = await runTool(toolName, input);
         if (res.ok) {
