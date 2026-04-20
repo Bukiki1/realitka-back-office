@@ -13,6 +13,7 @@ import {
   type Provider,
 } from "@/lib/models";
 import { routeAuto } from "@/lib/router";
+import { ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -131,6 +132,14 @@ export async function POST(req: NextRequest) {
       !!m && typeof m.content === "string" && (m.role === "user" || m.role === "assistant")
   );
   if (history.length === 0) return jsonError(400, "Prázdná konverzace.");
+
+  // Zajistíme, že lokální /tmp SQLite mirror má aktuální data z Turso.
+  // Synchronní nástroje (view_pipeline, match_clients_properties, …) čtou
+  // z tohoto mirror. Bez tohoto volání by po cold startu Vercel instance
+  // viděly prázdnou DB.
+  try { await ensureLocalReady(); } catch (err) {
+    console.warn("[chat] ensureLocalReady failed:", err instanceof Error ? err.message : err);
+  }
 
   const apiKeys = body.apiKeys ?? {};
   const requestedModel = body.model || AUTO_MODEL_ID;
