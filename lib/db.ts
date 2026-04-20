@@ -200,6 +200,7 @@ export async function pullTursoSnapshot(mode: DbMode = _activeMode): Promise<voi
     db.exec(SCHEMA);
     for (const m of MIGRATIONS) ensureColumnSync(db, m.table, m.column, m.type);
     migrateLeadsNullableFkSync(db);
+    migrateTransactionsNullableFkSync(db);
     db.exec(INDEXES);
     db.exec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;`);
     for (const base of BASE_TABLES) {
@@ -501,8 +502,8 @@ CREATE TABLE IF NOT EXISTS leads (
 
 CREATE TABLE IF NOT EXISTS transactions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  property_id INTEGER NOT NULL,
-  client_id INTEGER NOT NULL,
+  property_id INTEGER,
+  client_id INTEGER,
   sale_price INTEGER NOT NULL,
   commission INTEGER NOT NULL,
   transaction_date TEXT NOT NULL,
@@ -650,6 +651,79 @@ async function migrateLeadsNullableFkRemote(client: LibsqlClient): Promise<void>
   }
 }
 
+// ─── transactions: property_id / client_id musí být nullable (import může najít
+//     transakci bez přesné vazby; raději ji zapsat s NULL FK než odmítnout) ───
+
+function transactionsNeedsNullableMigrationSync(db: Database.Database): boolean {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(transactions)`).all() as Array<{ name: string; notnull: number }>;
+    return rows.some((r) => (r.name === "client_id" || r.name === "property_id") && r.notnull === 1);
+  } catch { return false; }
+}
+
+function transactionsRebuildSqlFor(prefix: ""|"test_"): string {
+  const T = `${prefix}transactions`;
+  const TN = `${prefix}transactions_new`;
+  return `
+CREATE TABLE ${TN} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  property_id INTEGER,
+  client_id INTEGER,
+  sale_price INTEGER NOT NULL,
+  commission INTEGER NOT NULL,
+  transaction_date TEXT NOT NULL,
+  FOREIGN KEY (property_id) REFERENCES ${prefix}properties(id),
+  FOREIGN KEY (client_id) REFERENCES ${prefix}clients(id)
+);
+INSERT INTO ${TN} (id, property_id, client_id, sale_price, commission, transaction_date)
+  SELECT id, property_id, client_id, sale_price, commission, transaction_date FROM ${T};
+DROP TABLE ${T};
+ALTER TABLE ${TN} RENAME TO ${T};
+`;
+}
+
+function migrateTransactionsNullableFkSync(db: Database.Database): void {
+  if (!transactionsNeedsNullableMigrationSync(db)) return;
+  try {
+    db.pragma("foreign_keys = OFF");
+    db.exec(transactionsRebuildSqlFor(""));
+    db.pragma("foreign_keys = ON");
+  } catch (err) {
+    console.warn("[local] transactions FK migration failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+async function transactionsNeedsNullableMigrationRemote(client: LibsqlClient, table: string): Promise<boolean> {
+  try {
+    const res = await client.execute({ sql: `PRAGMA table_info(${table})` });
+    const rows = (res as unknown as { rows?: Array<Record<string, unknown>> }).rows ?? [];
+    if (rows.length === 0) return false;
+    return rows.some((r) => {
+      const name = String((r as any).name ?? (r as any)[1] ?? "");
+      const notnull = Number((r as any).notnull ?? (r as any)[3] ?? 0);
+      return (name === "client_id" || name === "property_id") && notnull === 1;
+    });
+  } catch { return false; }
+}
+
+async function migrateTransactionsNullableFkRemote(client: LibsqlClient): Promise<void> {
+  const targets: Array<{ table: string; prefix: ""|"test_" }> = [
+    { table: "transactions", prefix: "" },
+    { table: "test_transactions", prefix: "test_" },
+  ];
+  for (const { table, prefix } of targets) {
+    try {
+      const needs = await transactionsNeedsNullableMigrationRemote(client, table);
+      if (!needs) continue;
+      const sql = transactionsRebuildSqlFor(prefix);
+      const parts = sql.split(";").map((s) => s.trim()).filter(Boolean);
+      for (const p of parts) await client.execute({ sql: p });
+    } catch (err) {
+      console.warn(`[turso] ${table} FK migration failed:`, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
 export function initSchema() {
   const db = getDb();
   db.exec(SCHEMA);
@@ -670,6 +744,7 @@ export async function initSchemaAsync(): Promise<void> {
       }
       for (const m of MIGRATIONS) await ensureColumnRemote(client, m.table, m.column, m.type);
       await migrateLeadsNullableFkRemote(client);
+      await migrateTransactionsNullableFkRemote(client);
       const idx = INDEXES.split(";").map((s) => s.trim()).filter(Boolean);
       for (const p of idx) {
         try { await client.execute({ sql: p }); } catch {}
