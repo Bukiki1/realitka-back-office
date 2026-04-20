@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, ensureLocalReady } from "@/lib/db";
+import { dbAll, dbGet, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -76,21 +76,20 @@ function dayBounds(d: Date): { from: string; to: string } {
 export async function GET() {
   try {
     await ensureLocalReady();
-    const db = getDb();
 
     // URGENTNÍ FOLLOW-UPY — leady v aktivních fázích, last_contact_at >= 5 dní
-    const staleRows = db.prepare(
+    const staleRows = await dbAll<Omit<StaleLead, "days_since">>(
       `SELECT l.id AS lead_id, l.client_id, c.name AS client_name,
               l.property_id, p.address AS property_addr,
               l.status, l.last_contact_at,
               COALESCE(l.estimated_commission, 0) AS estimated_commission
        FROM leads l
-       JOIN clients c ON c.id = l.client_id
-       JOIN properties p ON p.id = l.property_id
+       LEFT JOIN clients c ON c.id = l.client_id
+       LEFT JOIN properties p ON p.id = l.property_id
        WHERE l.status IN ('nový','kontaktován','prohlídka','nabídka')
          AND l.last_contact_at IS NOT NULL
-       ORDER BY l.last_contact_at ASC`
-    ).all() as Array<Omit<StaleLead, "days_since">>;
+       ORDER BY l.last_contact_at ASC`,
+    );
 
     const stale: StaleLead[] = staleRows
       .map((r) => ({ ...r, days_since: daysBetween(r.last_contact_at) }))
@@ -98,17 +97,17 @@ export async function GET() {
       .slice(0, 20);
 
     // NEKOMPLETNÍ DATA — nemovitosti bez reconstruction_data NEBO building_modifications
-    const missingRows = db.prepare(
+    const missingRows = await dbAll<{
+      id: number; address: string; city: string;
+      reconstruction_data: string | null; building_modifications: string | null;
+    }>(
       `SELECT id, address, city, reconstruction_data, building_modifications
        FROM properties
        WHERE status = 'aktivní'
          AND (reconstruction_data IS NULL OR building_modifications IS NULL)
        ORDER BY price DESC
-       LIMIT 10`
-    ).all() as Array<{
-      id: number; address: string; city: string;
-      reconstruction_data: string | null; building_modifications: string | null;
-    }>;
+       LIMIT 10`,
+    );
     const missing: MissingData[] = missingRows.map((r) => {
       const m: string[] = [];
       if (!r.reconstruction_data) m.push("rekonstrukce");
@@ -131,11 +130,16 @@ export async function GET() {
                        WHERE e.start_time >= ? AND e.start_time < ?
                        ORDER BY e.start_time ASC`;
 
-    const todaysTasks = db.prepare(calSelect).all(todayBounds.from, todayBounds.to) as CalendarItem[];
-    const tomorrowsPreview = db.prepare(calSelect).all(tomorrowBounds.from, tomorrowBounds.to) as CalendarItem[];
+    const todaysTasks = await dbAll<CalendarItem>(calSelect, [todayBounds.from, todayBounds.to]);
+    const tomorrowsPreview = await dbAll<CalendarItem>(calSelect, [tomorrowBounds.from, tomorrowBounds.to]);
 
     // NOVÉ PŘÍLEŽITOSTI — klienti s vyplněnými preferencemi, kteří ještě nemají lead ve fázi nabídka/uzavřen
-    const opps = db.prepare(
+    const opps = await dbAll<{
+      client_id: number; client_name: string;
+      preferred_locality: string | null;
+      budget_min: number | null; budget_max: number | null;
+      preferred_type: string | null;
+    }>(
       `SELECT c.id AS client_id, c.name AS client_name,
               c.preferred_locality, c.budget_min, c.budget_max, c.preferred_type
        FROM clients c
@@ -145,15 +149,10 @@ export async function GET() {
            WHERE l.client_id = c.id AND l.status IN ('nabídka','uzavřen')
          )
        ORDER BY c.budget_max DESC
-       LIMIT 5`
-    ).all() as Array<{
-      client_id: number; client_name: string;
-      preferred_locality: string | null;
-      budget_min: number | null; budget_max: number | null;
-      preferred_type: string | null;
-    }>;
+       LIMIT 5`,
+    );
 
-    const opportunities: Opportunity[] = opps.map((o) => {
+    const opportunities: Opportunity[] = await Promise.all(opps.map(async (o) => {
       // Pokusí se najít 1–2 matching property.
       const params: unknown[] = [];
       let where = "status = 'aktivní'";
@@ -166,9 +165,10 @@ export async function GET() {
       if (o.budget_max) { where += " AND price <= ?"; params.push(Math.round(o.budget_max * 1.1)); }
       if (o.budget_min) { where += " AND price >= ?"; params.push(Math.round(o.budget_min * 0.8)); }
 
-      const match = db.prepare(
-        `SELECT address FROM properties WHERE ${where} ORDER BY price LIMIT 1`
-      ).get(...params) as { address?: string } | undefined;
+      const match = await dbGet<{ address?: string }>(
+        `SELECT address FROM properties WHERE ${where} ORDER BY price LIMIT 1`,
+        params,
+      );
 
       const suggestion = match?.address
         ? `Vhodná nabídka: ${match.address}`
@@ -183,24 +183,25 @@ export async function GET() {
         preferred_type: o.preferred_type,
         suggestion,
       };
-    });
+    }));
 
     // PROVIZE — tento měsíc (realizované) + predikce (leady v nabídka/uzavřen)
     const now = new Date();
     const mStart = firstOfMonth(now);
     const mEnd = nextMonth(now);
 
-    const realizedRow = db.prepare(
+    const realizedRow = (await dbGet<{ s: number; c: number }>(
       `SELECT COALESCE(SUM(commission), 0) AS s, COUNT(*) AS c
        FROM transactions
-       WHERE transaction_date >= ? AND transaction_date < ?`
-    ).get(mStart, mEnd) as { s: number; c: number };
+       WHERE transaction_date >= ? AND transaction_date < ?`,
+      [mStart, mEnd],
+    )) ?? { s: 0, c: 0 };
 
-    const pipelineRow = db.prepare(
+    const pipelineRow = (await dbGet<{ s: number; c: number }>(
       `SELECT COALESCE(SUM(l.estimated_commission), 0) AS s, COUNT(*) AS c
        FROM leads l
-       WHERE l.status IN ('nabídka')`
-    ).get() as { s: number; c: number };
+       WHERE l.status IN ('nabídka')`,
+    )) ?? { s: 0, c: 0 };
 
     // Ohrožená provize = součet estimated_commission u stale leadů.
     const threatenedCommission = stale.reduce((a, b) => a + (b.estimated_commission || 0), 0);

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, ensureLocalReady } from "@/lib/db";
+import { dbAll, ensureLocalReady } from "@/lib/db";
 import { runTool } from "@/lib/tools";
 
 export const runtime = "nodejs";
@@ -7,8 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   await ensureLocalReady();
-  const db = getDb();
-  const rows = db.prepare(`SELECT * FROM clients ORDER BY id`).all();
+  const rows = await dbAll(`SELECT * FROM clients ORDER BY id`);
   return NextResponse.json({ count: rows.length, clients: rows });
 }
 

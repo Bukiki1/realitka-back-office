@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, dbRun, ensureLocalReady } from "@/lib/db";
+import { dbGet, dbRun, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +26,7 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   if (sets.length === 0) return NextResponse.json({ ok: false, error: "Žádná pole k úpravě." }, { status: 400 });
   args.push(id);
   await dbRun(`UPDATE properties SET ${sets.join(", ")} WHERE id = ?`, args);
-  const row = getDb().prepare(`SELECT * FROM properties WHERE id = ?`).get(id);
+  const row = await dbGet(`SELECT * FROM properties WHERE id = ?`, [id]);
   return NextResponse.json({ ok: true, property: row });
 }
 

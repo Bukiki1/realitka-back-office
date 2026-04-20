@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, dbRun, dbExec, ensureLocalReady } from "@/lib/db";
+import { dbRun, dbExec, dbGet, ensureLocalReady } from "@/lib/db";
 import { runTool } from "@/lib/tools";
 
 export const runtime = "nodejs";
@@ -8,12 +8,11 @@ export const dynamic = "force-dynamic";
 const TABLES = ["clients", "properties", "leads", "transactions", "calendar_events"] as const;
 type TableName = typeof TABLES[number];
 
+// Leads a calendar_events řešíme vlastními handlery (partial match + null FK).
 const TOOL_BY_TABLE: Partial<Record<TableName, string>> = {
   clients: "add_client",
   properties: "add_property",
-  leads: "add_lead",
   transactions: "add_transaction",
-  // calendar_events inserujeme přímo (žádný jednoduchý import tool).
 };
 
 const NUMERIC_FIELDS: Record<TableName, string[]> = {
@@ -23,6 +22,8 @@ const NUMERIC_FIELDS: Record<TableName, string[]> = {
   transactions: ["property_id", "client_id", "sale_price", "commission"],
   calendar_events: ["client_id", "property_id"],
 };
+
+const LEAD_STATUSES = ["nový", "kontaktován", "prohlídka", "nabídka", "uzavřen"] as const;
 
 function applyMapping(
   row: Record<string, unknown>,
@@ -83,6 +84,99 @@ async function insertCalendarEvent(row: Record<string, unknown>) {
   );
 }
 
+// Lead import: LIKE match pro klienta/nemovitost; pokud nenalezeno, zapíše se
+// s NULL FK a vrací warning, aby se řádek neztratil.
+type LeadInsertResult = { ok: true; warnings: string[] } | { ok: false; error: string };
+
+async function insertLead(row: Record<string, unknown>): Promise<LeadInsertResult> {
+  const warnings: string[] = [];
+
+  const clientId = await resolveClientId(row);
+  if (clientId === null) warnings.push("Klient nepárován, lead importován bez vazby");
+
+  const propertyId = await resolveProperty(row);
+  if (propertyId === null && hasPropertyHint(row)) {
+    warnings.push("Nemovitost nepárována, lead importován bez vazby");
+  }
+
+  const statusInput = typeof row.status === "string" ? row.status.trim() : "";
+  const status = (LEAD_STATUSES as readonly string[]).includes(statusInput) ? statusInput : "nový";
+  const source = typeof row.source === "string" && row.source.trim() ? row.source.trim() : "import";
+
+  const now = new Date().toISOString();
+  const last_contact_at = typeof row.last_contact_at === "string" && row.last_contact_at.trim()
+    ? row.last_contact_at.trim() : now;
+  const next_action = typeof row.next_action === "string" ? row.next_action : null;
+  const estimated_commission = typeof row.estimated_commission === "number" && Number.isFinite(row.estimated_commission)
+    ? row.estimated_commission : null;
+
+  try {
+    await dbRun(
+      `INSERT INTO leads (client_id, property_id, status, source, created_at, last_contact_at, next_action, estimated_commission)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [clientId, propertyId, status, source, now, last_contact_at, next_action, estimated_commission],
+    );
+    return { ok: true, warnings };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+async function resolveClientId(row: Record<string, unknown>): Promise<number | null> {
+  if (typeof row.client_id === "number" && Number.isFinite(row.client_id)) {
+    const hit = await dbGet<{ id: number }>(`SELECT id FROM clients WHERE id = ?`, [row.client_id]);
+    if (hit) return hit.id;
+  }
+  const name = typeof row.client_name === "string" ? row.client_name.trim() : "";
+  if (name) {
+    const hit = await dbGet<{ id: number }>(
+      `SELECT id FROM clients WHERE name LIKE ? ORDER BY created_at DESC LIMIT 1`,
+      [`%${name}%`],
+    );
+    if (hit) return hit.id;
+  }
+  const email = typeof row.client_email === "string" ? row.client_email.trim() : "";
+  if (email) {
+    const hit = await dbGet<{ id: number }>(
+      `SELECT id FROM clients WHERE email = ? ORDER BY created_at DESC LIMIT 1`,
+      [email],
+    );
+    if (hit) return hit.id;
+  }
+  const phone = typeof row.client_phone === "string" ? row.client_phone.trim() : "";
+  if (phone) {
+    const hit = await dbGet<{ id: number }>(
+      `SELECT id FROM clients WHERE phone = ? ORDER BY created_at DESC LIMIT 1`,
+      [phone],
+    );
+    if (hit) return hit.id;
+  }
+  return null;
+}
+
+async function resolveProperty(row: Record<string, unknown>): Promise<number | null> {
+  if (typeof row.property_id === "number" && Number.isFinite(row.property_id)) {
+    const hit = await dbGet<{ id: number }>(`SELECT id FROM properties WHERE id = ?`, [row.property_id]);
+    if (hit) return hit.id;
+  }
+  const addr = typeof row.property_address === "string" ? row.property_address.trim() : "";
+  if (addr) {
+    const hit = await dbGet<{ id: number }>(
+      `SELECT id FROM properties WHERE address LIKE ? ORDER BY created_at DESC LIMIT 1`,
+      [`%${addr}%`],
+    );
+    if (hit) return hit.id;
+  }
+  return null;
+}
+
+function hasPropertyHint(row: Record<string, unknown>): boolean {
+  return Boolean(
+    (typeof row.property_id === "number" && Number.isFinite(row.property_id)) ||
+    (typeof row.property_address === "string" && row.property_address.trim()),
+  );
+}
+
 async function clearTable(table: TableName): Promise<void> {
   if (table === "clients") {
     await dbExec(`DELETE FROM transactions; DELETE FROM leads; DELETE FROM clients;`);
@@ -129,13 +223,25 @@ export async function POST(req: Request) {
   let inserted = 0;
   let skipped = 0;
   const errors: Array<{ row: number; error: string }> = [];
+  const warnings: Array<{ row: number; warning: string }> = [];
   const toolName = TOOL_BY_TABLE[table];
 
   for (let i = 0; i < rows.length; i++) {
     const mapped = applyMapping(rows[i], mapping);
     const input = coerceForTable(table, mapped);
     try {
-      if (toolName) {
+      if (table === "leads") {
+        const res = await insertLead(input);
+        if (res.ok) {
+          inserted++;
+          for (const w of res.warnings) warnings.push({ row: i + 2, warning: w });
+        } else {
+          errors.push({ row: i + 2, error: res.error });
+        }
+      } else if (table === "calendar_events") {
+        await insertCalendarEvent(input);
+        inserted++;
+      } else if (toolName) {
         const res = await runTool(toolName, input);
         if (res.ok) {
           inserted++;
@@ -144,9 +250,6 @@ export async function POST(req: Request) {
           if (/UNIQUE|duplic/i.test(err)) skipped++;
           errors.push({ row: i + 2, error: err });
         }
-      } else if (table === "calendar_events") {
-        await insertCalendarEvent(input);
-        inserted++;
       }
     } catch (e) {
       errors.push({ row: i + 2, error: e instanceof Error ? e.message : String(e) });
@@ -161,6 +264,8 @@ export async function POST(req: Request) {
     skipped,
     errors: errors.slice(0, 20),
     error_count: errors.length,
+    warnings: warnings.slice(0, 50),
+    warning_count: warnings.length,
     strategy: strategy ?? "append",
   });
 }

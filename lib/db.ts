@@ -199,6 +199,7 @@ export async function pullTursoSnapshot(mode: DbMode = _activeMode): Promise<voi
     const db = getDb();
     db.exec(SCHEMA);
     for (const m of MIGRATIONS) ensureColumnSync(db, m.table, m.column, m.type);
+    migrateLeadsNullableFkSync(db);
     db.exec(INDEXES);
     db.exec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;`);
     for (const base of BASE_TABLES) {
@@ -225,6 +226,40 @@ export async function pullTursoSnapshot(mode: DbMode = _activeMode): Promise<voi
   } catch (err) {
     console.warn("[turso] snapshot pull failed:", err instanceof Error ? err.message : err);
   }
+}
+
+// ─────────────────────────── Async read API ───────────────────────────
+// Čtení jdou primárně do Turso (cloud = zdroj pravdy). Lokální better-sqlite3
+// mirror slouží jen pro agent/chat tool flow (lib/tools.ts) kde potřebujeme
+// synchronní čtení. Všechny nové API routes by měly používat dbAll/dbGet.
+
+function libsqlRowsToObjects<T>(rs: { columns?: string[]; rows?: unknown[][] }): T[] {
+  const cols = rs.columns ?? [];
+  const rows = rs.rows ?? [];
+  if (cols.length === 0) return rows as T[];
+  return rows.map((r) => {
+    const o: Record<string, unknown> = {};
+    for (let i = 0; i < cols.length; i++) o[cols[i]] = (r as unknown[])[i];
+    return o as T;
+  });
+}
+
+export async function dbAll<T = Record<string, unknown>>(sql: string, args: unknown[] = []): Promise<T[]> {
+  if (hasTursoConfig()) {
+    const client = await getTursoClient();
+    if (client) {
+      const rewritten = rewriteSqlForMode(sql, _activeMode);
+      const res = await client.execute({ sql: rewritten, args: libsqlArgs(args) });
+      return libsqlRowsToObjects<T>(res as unknown as { columns?: string[]; rows?: unknown[][] });
+    }
+  }
+  const db = getDb();
+  return db.prepare(sql).all(...(args as any[])) as T[];
+}
+
+export async function dbGet<T = Record<string, unknown>>(sql: string, args: unknown[] = []): Promise<T | undefined> {
+  const rows = await dbAll<T>(sql, args);
+  return rows[0];
 }
 
 // ─────────────────────────── Async write API ───────────────────────────
@@ -452,8 +487,8 @@ CREATE TABLE IF NOT EXISTS properties (
 
 CREATE TABLE IF NOT EXISTS leads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  client_id INTEGER NOT NULL,
-  property_id INTEGER NOT NULL,
+  client_id INTEGER,
+  property_id INTEGER,
   status TEXT NOT NULL CHECK (status IN ('nový','kontaktován','prohlídka','nabídka','uzavřen')),
   source TEXT NOT NULL,
   created_at TEXT NOT NULL,
@@ -538,10 +573,88 @@ async function ensureColumnRemote(client: LibsqlClient, table: string, column: s
   }
 }
 
+// Leads měly dřív NOT NULL na client_id / property_id. Teď je povolujeme jako
+// nullable, protože import dokáže vložit lead i bez přesné shody s klientem
+// nebo nemovitostí. Migrace rebuilduje tabulku, pokud stará NOT NULL existuje.
+
+function leadsNeedsNullableMigrationSync(db: Database.Database): boolean {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(leads)`).all() as Array<{ name: string; notnull: number }>;
+    return rows.some((r) => (r.name === "client_id" || r.name === "property_id") && r.notnull === 1);
+  } catch { return false; }
+}
+
+function migrateLeadsNullableFkSync(db: Database.Database): void {
+  if (!leadsNeedsNullableMigrationSync(db)) return;
+  try {
+    db.pragma("foreign_keys = OFF");
+    db.exec(leadsRebuildSqlFor(""));
+    db.pragma("foreign_keys = ON");
+  } catch (err) {
+    console.warn("[local] leads FK migration failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+async function leadsNeedsNullableMigrationRemote(client: LibsqlClient, table: string): Promise<boolean> {
+  try {
+    const res = await client.execute({ sql: `PRAGMA table_info(${table})` });
+    const rows = (res as unknown as { rows?: Array<Record<string, unknown>> }).rows ?? [];
+    if (rows.length === 0) return false;
+    return rows.some((r) => {
+      const name = String((r as any).name ?? (r as any)[1] ?? "");
+      const notnull = Number((r as any).notnull ?? (r as any)[3] ?? 0);
+      return (name === "client_id" || name === "property_id") && notnull === 1;
+    });
+  } catch { return false; }
+}
+
+function leadsRebuildSqlFor(prefix: ""|"test_"): string {
+  const T = `${prefix}leads`;
+  const TN = `${prefix}leads_new`;
+  return `
+CREATE TABLE ${TN} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER,
+  property_id INTEGER,
+  status TEXT NOT NULL CHECK (status IN ('nový','kontaktován','prohlídka','nabídka','uzavřen')),
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_contact_at TEXT,
+  next_action TEXT,
+  estimated_commission REAL,
+  FOREIGN KEY (client_id) REFERENCES ${prefix}clients(id),
+  FOREIGN KEY (property_id) REFERENCES ${prefix}properties(id)
+);
+INSERT INTO ${TN} (id, client_id, property_id, status, source, created_at, last_contact_at, next_action, estimated_commission)
+  SELECT id, client_id, property_id, status, source, created_at, last_contact_at, next_action, estimated_commission FROM ${T};
+DROP TABLE ${T};
+ALTER TABLE ${TN} RENAME TO ${T};
+`;
+}
+
+async function migrateLeadsNullableFkRemote(client: LibsqlClient): Promise<void> {
+  const targets: Array<{ table: string; prefix: ""|"test_" }> = [
+    { table: "leads", prefix: "" },
+    { table: "test_leads", prefix: "test_" },
+  ];
+  for (const { table, prefix } of targets) {
+    try {
+      const needs = await leadsNeedsNullableMigrationRemote(client, table);
+      if (!needs) continue;
+      const sql = leadsRebuildSqlFor(prefix);
+      const parts = sql.split(";").map((s) => s.trim()).filter(Boolean);
+      for (const p of parts) await client.execute({ sql: p });
+    } catch (err) {
+      console.warn(`[turso] ${table} FK migration failed:`, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
 export function initSchema() {
   const db = getDb();
   db.exec(SCHEMA);
   for (const m of MIGRATIONS) ensureColumnSync(db, m.table, m.column, m.type);
+  migrateLeadsNullableFkSync(db);
   db.exec(INDEXES);
 }
 
@@ -556,6 +669,7 @@ export async function initSchemaAsync(): Promise<void> {
         }
       }
       for (const m of MIGRATIONS) await ensureColumnRemote(client, m.table, m.column, m.type);
+      await migrateLeadsNullableFkRemote(client);
       const idx = INDEXES.split(";").map((s) => s.trim()).filter(Boolean);
       for (const p of idx) {
         try { await client.execute({ sql: p }); } catch {}

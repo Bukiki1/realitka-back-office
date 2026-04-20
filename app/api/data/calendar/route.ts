@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
-import { getDb, dbRun, ensureLocalReady } from "@/lib/db";
+import { dbAll, dbGet, dbRun, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   await ensureLocalReady();
-  const db = getDb();
-  const rows = db.prepare(`SELECT * FROM calendar_events ORDER BY start_time DESC`).all();
+  const rows = await dbAll(`SELECT * FROM calendar_events ORDER BY start_time DESC`);
   return NextResponse.json({ count: rows.length, events: rows });
 }
 
@@ -38,6 +37,6 @@ export async function POST(req: Request) {
     ],
   );
   const id = Number(info.lastInsertRowid);
-  const row = getDb().prepare(`SELECT * FROM calendar_events WHERE id = ?`).get(id);
+  const row = await dbGet(`SELECT * FROM calendar_events WHERE id = ?`, [id]);
   return NextResponse.json({ ok: true, id, event: row }, { status: 201 });
 }

@@ -89,6 +89,8 @@ type CommitResult = {
   skipped: number;
   error_count: number;
   errors: Array<{ row: number; error: string }>;
+  warnings?: Array<{ row: number; warning: string }>;
+  warning_count?: number;
   strategy?: string;
 };
 
@@ -488,6 +490,8 @@ function ImportSection({ table }: { table: TableKey }) {
           skipped: data.skipped ?? 0,
           error_count: data.error_count ?? 0,
           errors: data.errors ?? [],
+          warnings: data.warnings ?? [],
+          warning_count: data.warning_count ?? 0,
           strategy: data.strategy,
         });
         await refreshRecords();
@@ -702,6 +706,18 @@ function ImportSection({ table }: { table: TableKey }) {
               <ul className="mt-2 space-y-0.5">
                 {result.errors.map((e, i) => (
                   <li key={i} className="text-text-dim">Řádek {e.row}: {e.error}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {result.warnings && result.warnings.length > 0 && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-amber-300">
+                Upozornění: {result.warning_count ?? result.warnings.length} záznamů bez vazby
+              </summary>
+              <ul className="mt-2 space-y-0.5">
+                {result.warnings.map((w, i) => (
+                  <li key={i} className="text-amber-200/80">Řádek {w.row}: {w.warning}</li>
                 ))}
               </ul>
             </details>

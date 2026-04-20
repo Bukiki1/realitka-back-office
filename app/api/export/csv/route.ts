@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, ensureLocalReady } from "@/lib/db";
+import { dbAll, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,8 +30,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: false, error: `table musí být ${ALLOWED.join("/")}.` }, { status: 400 });
   }
   const table = tableParam as Table;
-  const db = getDb();
-  const rows = db.prepare(`SELECT * FROM ${table} ORDER BY id`).all() as Array<Record<string, unknown>>;
+  const rows = await dbAll<Record<string, unknown>>(`SELECT * FROM ${table} ORDER BY id`);
   const csv = "\uFEFF" + rowsToCsv(rows); // BOM kvůli Excelu
   const filename = `realitka-${table}-${new Date().toISOString().slice(0, 10)}.csv`;
   return new NextResponse(csv, {

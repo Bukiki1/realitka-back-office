@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, ensureLocalReady, dbExec } from "@/lib/db";
+import { dbGet, ensureLocalReady, dbExec } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,13 +17,17 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  const db = getDb();
   const singleTable = body.table && ALLOWED_TABLES.includes(body.table as AllowedTable)
     ? (body.table as AllowedTable) : null;
 
+  const count = async (t: string): Promise<number> => {
+    const row = await dbGet<{ c: number }>(`SELECT COUNT(*) AS c FROM ${t}`);
+    return row?.c ?? 0;
+  };
+
   try {
     if (singleTable) {
-      const before = (db.prepare(`SELECT COUNT(*) AS c FROM ${singleTable}`).get() as { c: number }).c;
+      const before = await count(singleTable);
       // Při mazání rodičovských tabulek nejdřív vyčistit závislé leads/transakce.
       if (singleTable === "clients") {
         await dbExec(`DELETE FROM transactions; DELETE FROM leads; DELETE FROM clients;`);
@@ -37,11 +41,11 @@ export async function POST(req: Request) {
     }
 
     const before = {
-      clients: (db.prepare(`SELECT COUNT(*) AS c FROM clients`).get() as { c: number }).c,
-      properties: (db.prepare(`SELECT COUNT(*) AS c FROM properties`).get() as { c: number }).c,
-      leads: (db.prepare(`SELECT COUNT(*) AS c FROM leads`).get() as { c: number }).c,
-      transactions: (db.prepare(`SELECT COUNT(*) AS c FROM transactions`).get() as { c: number }).c,
-      calendar_events: (db.prepare(`SELECT COUNT(*) AS c FROM calendar_events`).get() as { c: number }).c,
+      clients: await count("clients"),
+      properties: await count("properties"),
+      leads: await count("leads"),
+      transactions: await count("transactions"),
+      calendar_events: await count("calendar_events"),
     };
     await dbExec(`DELETE FROM calendar_events; DELETE FROM transactions; DELETE FROM leads; DELETE FROM properties; DELETE FROM clients;`);
     await dbExec(`DELETE FROM sqlite_sequence WHERE name IN ('clients','properties','leads','transactions','calendar_events');`);

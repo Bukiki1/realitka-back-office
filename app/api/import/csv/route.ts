@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, ensureLocalReady } from "@/lib/db";
+import { ensureLocalReady } from "@/lib/db";
 import { runTool } from "@/lib/tools";
 
 export const runtime = "nodejs";

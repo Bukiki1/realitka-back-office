@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDb, ensureLocalReady } from "@/lib/db";
+import { dbGet, ensureLocalReady } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,85 +32,96 @@ function trend(delta: number): "up" | "down" | "flat" {
 export async function GET() {
   try {
     await ensureLocalReady();
-    const db = getDb();
 
     const now = new Date();
     const thisMonthStart = firstOfMonth(now);
     const prevMonthStart = firstOfPrevMonth(now);
 
+    const sumOf = async (sql: string, args: unknown[] = []): Promise<number> =>
+      (await dbGet<Sum>(sql, args))?.s ?? 0;
+    const countOf = async (sql: string, args: unknown[] = []): Promise<number> =>
+      (await dbGet<Count>(sql, args))?.c ?? 0;
+
     // Portfolio hodnota (aktivní nemovitosti).
-    const portfolioValue = (db.prepare(
-      `SELECT COALESCE(SUM(price), 0) AS s FROM properties WHERE status = 'aktivní'`
-    ).get() as Sum).s ?? 0;
+    const portfolioValue = await sumOf(
+      `SELECT COALESCE(SUM(price), 0) AS s FROM properties WHERE status = 'aktivní'`,
+    );
 
     // Aktivní nemovitosti.
-    const activeProperties = (db.prepare(
-      `SELECT COUNT(*) AS c FROM properties WHERE status = 'aktivní'`
-    ).get() as Count).c;
+    const activeProperties = await countOf(
+      `SELECT COUNT(*) AS c FROM properties WHERE status = 'aktivní'`,
+    );
 
     // Otevřené leady (status != 'uzavřen').
-    const openLeads = (db.prepare(
-      `SELECT COUNT(*) AS c FROM leads WHERE status != 'uzavřen'`
-    ).get() as Count).c;
+    const openLeads = await countOf(
+      `SELECT COUNT(*) AS c FROM leads WHERE status != 'uzavřen'`,
+    );
 
     // Konverzní poměr (uzavřené / celkové).
-    const totalLeads = (db.prepare(
-      `SELECT COUNT(*) AS c FROM leads`
-    ).get() as Count).c;
-    const closedLeads = (db.prepare(
-      `SELECT COUNT(*) AS c FROM leads WHERE status = 'uzavřen'`
-    ).get() as Count).c;
+    const totalLeads = await countOf(`SELECT COUNT(*) AS c FROM leads`);
+    const closedLeads = await countOf(
+      `SELECT COUNT(*) AS c FROM leads WHERE status = 'uzavřen'`,
+    );
     const conversionRate = totalLeads > 0
       ? Math.round((closedLeads / totalLeads) * 1000) / 10
       : 0;
 
     // Tržby aktuální měsíc.
-    const monthlyRevenue = (db.prepare(
+    const monthlyRevenue = await sumOf(
       `SELECT COALESCE(SUM(sale_price), 0) AS s FROM transactions
-       WHERE transaction_date >= ? AND transaction_date < ?`
-    ).get(thisMonthStart, nextMonth(now)) as Sum).s ?? 0;
+       WHERE transaction_date >= ? AND transaction_date < ?`,
+      [thisMonthStart, nextMonth(now)],
+    );
 
     // Tržby minulý měsíc (pro trend).
-    const prevMonthlyRevenue = (db.prepare(
+    const prevMonthlyRevenue = await sumOf(
       `SELECT COALESCE(SUM(sale_price), 0) AS s FROM transactions
-       WHERE transaction_date >= ? AND transaction_date < ?`
-    ).get(prevMonthStart, thisMonthStart) as Sum).s ?? 0;
+       WHERE transaction_date >= ? AND transaction_date < ?`,
+      [prevMonthStart, thisMonthStart],
+    );
 
     // Noví klienti aktuální měsíc.
-    const newClients = (db.prepare(
+    const newClients = await countOf(
       `SELECT COUNT(*) AS c FROM clients
-       WHERE created_at >= ? AND created_at < ?`
-    ).get(thisMonthStart, nextMonth(now)) as Count).c;
+       WHERE created_at >= ? AND created_at < ?`,
+      [thisMonthStart, nextMonth(now)],
+    );
 
-    const prevNewClients = (db.prepare(
+    const prevNewClients = await countOf(
       `SELECT COUNT(*) AS c FROM clients
-       WHERE created_at >= ? AND created_at < ?`
-    ).get(prevMonthStart, thisMonthStart) as Count).c;
+       WHERE created_at >= ? AND created_at < ?`,
+      [prevMonthStart, thisMonthStart],
+    );
 
     // Minulý měsíc srovnání pro portfolio/leady — schéma snapshot neexistuje,
     // takže použijeme heuristiku na základě properties.created_at a leads.created_at.
-    const prevActiveProperties = (db.prepare(
+    const prevActiveProperties = await countOf(
       `SELECT COUNT(*) AS c FROM properties
-       WHERE status = 'aktivní' AND created_at < ?`
-    ).get(thisMonthStart) as Count).c;
+       WHERE status = 'aktivní' AND created_at < ?`,
+      [thisMonthStart],
+    );
 
-    const prevOpenLeads = (db.prepare(
+    const prevOpenLeads = await countOf(
       `SELECT COUNT(*) AS c FROM leads
-       WHERE status != 'uzavřen' AND created_at < ?`
-    ).get(thisMonthStart) as Count).c;
+       WHERE status != 'uzavřen' AND created_at < ?`,
+      [thisMonthStart],
+    );
 
-    const prevPortfolioValue = (db.prepare(
+    const prevPortfolioValue = await sumOf(
       `SELECT COALESCE(SUM(price), 0) AS s FROM properties
-       WHERE status = 'aktivní' AND created_at < ?`
-    ).get(thisMonthStart) as Sum).s ?? 0;
+       WHERE status = 'aktivní' AND created_at < ?`,
+      [thisMonthStart],
+    );
 
-    const prevClosedLeads = (db.prepare(
+    const prevClosedLeads = await countOf(
       `SELECT COUNT(*) AS c FROM leads
-       WHERE status = 'uzavřen' AND created_at < ?`
-    ).get(thisMonthStart) as Count).c;
-    const prevTotalLeads = (db.prepare(
-      `SELECT COUNT(*) AS c FROM leads WHERE created_at < ?`
-    ).get(thisMonthStart) as Count).c;
+       WHERE status = 'uzavřen' AND created_at < ?`,
+      [thisMonthStart],
+    );
+    const prevTotalLeads = await countOf(
+      `SELECT COUNT(*) AS c FROM leads WHERE created_at < ?`,
+      [thisMonthStart],
+    );
     const prevConversionRate = prevTotalLeads > 0
       ? Math.round((prevClosedLeads / prevTotalLeads) * 1000) / 10
       : 0;
